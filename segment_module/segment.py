@@ -21,7 +21,9 @@ from ultralytics import YOLO
 # Config
 # ---------------------------------------------------------------------------
 
-MODEL_ID = "yolo11n.pt"   # auto-downloaded on first run; swap for yolo11s/m/l/x for more accuracy
+_ROOT     = Path(__file__).parent.parent
+_FINETUNED = _ROOT / "runs" / "detect" / "theker_finetune" / "weights" / "best.pt"
+MODEL_ID  = str(_FINETUNED) if _FINETUNED.exists() else "yolo26n.pt"
 
 # ---------------------------------------------------------------------------
 # COCO label → risk group
@@ -105,9 +107,17 @@ def detect_image(
         label = model.names[int(box.cls[0])]
         rel_area = round((x2 - x1) * (y2 - y1) / (W * H), 6)
 
+        # Fine-tuned model already outputs risk-group names directly.
+        # Pretrained model outputs COCO names → map via COCO_TO_GROUP.
+        FINETUNED_GROUPS = {"HUMAN", "VEHICLE", "OBSTACLE", "SAFETY_MARKER", "BACKGROUND"}
+        if label in FINETUNED_GROUPS:
+            risk_group = label
+        else:
+            risk_group = COCO_TO_GROUP.get(label, "other")
+
         detections.append({
             "label":         label,
-            "risk_group":    COCO_TO_GROUP.get(label, "other"),
+            "risk_group":    risk_group,
             "box":           [x1, y1, x2, y2],
             "score":         score,
             "relative_area": rel_area,
