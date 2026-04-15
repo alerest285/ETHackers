@@ -1,24 +1,21 @@
 """
-Main pre-processing pipeline (Phase 1–5).
+Main pipeline — 7-step perception-to-decision.
 
-Steps:
-  1. Sample N random images from the training set.
-  2. Run YOLO detection (segment_module) → labeled boxes per image.
-  3. Filter with filter_module → discard images with no relevant objects.
-  4. Run DepthAnything (depth_module) on remaining images.
-  5. Combine YOLO boxes + depth info into a single overlay image (depth_overlay).
-  6. Run Qwen2.5-VL (llm_module) on each kept image → scene analysis text.
-
-Outputs saved to data/pipeline_output/:
-  detections/<stem>.json          — YOLO detections enriched with depth info
-  overlays/<stem>_overlay.png     — side-by-side: YOLO boxes | depth heatmap
-  llm/<stem>_analysis.txt         — Qwen scene description + navigation decision
-  discarded/<stem>.json           — detections for discarded images (for reference)
+Steps per image:
+  1. GPT-4o-mini generates an optimised Grounding DINO object prompt.
+  2. Grounding DINO detects objects (open-vocabulary, no fixed classes).
+  3. SAM2 segments each detected object to pixel-level masks.
+  4. DepthAnything V2 produces a monocular depth map.
+     4a. LLM holistic depth signals enrich per-object depth estimates.
+     4b. Edge-clipping rationalization corrects truncated detections.
+     4c. Triple-fused depth (DA + real-world size + bbox area) per object.
+  5. 3D lift + scene graph: project depth → point cloud → spatial relations.
+  6. GPT-4o-mini reads the scene graph + SAFETY_RULES → STOP/SLOW/CONTINUE.
 
 Usage:
-  python src/pipeline.py                  # 5 images
-  python src/pipeline.py --n 20           # 20 images
-  python src/pipeline.py --seed 7         # different random sample
+  python src/pipeline.py                  # 5 random images
+  python src/pipeline.py --n 20
+  python src/pipeline.py --n 3 --seed 7   # reproducible sample
 """
 
 import argparse
@@ -27,202 +24,282 @@ import random
 import sys
 from pathlib import Path
 
-import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFile
 from tqdm import tqdm
 from transformers import pipeline as hf_pipeline
 
-# ── local imports ─────────────────────────────────────────────────────────────
-sys.path.insert(0, str(Path(__file__).parent.parent))
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-from segment_module.segment      import load_model as load_yolo, detect_image
-from src.label_ontology          import map_detections
-from src.filter_module           import filter_images
-from src.depth_overlay           import make_overlay
-from src.edge_rationalization    import rationalize_edge_detections
-from src.llm_depth               import get_llm_depth_signals
-from depth_module.fused_depth    import enrich_detections as fused_enrich
-from llm_module.llm              import get_client as get_llm_client, process_one as llm_process
+# ── repo root on sys.path ─────────────────────────────────────────────────────
+ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "3d-module"))   # hyphenated folder — import via path
+
+# ── local imports ─────────────────────────────────────────────────────────────
+from segment_module.llm_objects    import load_client as load_llm_client, get_detection_prompt
+from segment_module.grounding_dino import load_model  as load_gdino,      detect
+from segment_module.sam2           import load_model  as load_sam2,       segment, masks_to_overlay
+from depth_module.fused_depth      import enrich_detections
+from src.filter_module             import is_interesting
+from src.edge_rationalization      import rationalize_edge_detections
+from src.llm_depth                 import get_llm_depth_signals
+from llm_module.llm                import get_client  as get_llm_client,  analyse_with_scene_graph
+from lift_3d                       import SceneGraphBuilder, visualize_3d
 
 # ── paths ─────────────────────────────────────────────────────────────────────
-TRAIN_DIR   = Path("data/images/train")
-OUT_ROOT    = Path("data/pipeline_output")
-OUT_DET     = OUT_ROOT / "detections"
-OUT_OVERLAY = OUT_ROOT / "overlays"
-OUT_DISC    = OUT_ROOT / "discarded"
-OUT_LLM     = OUT_ROOT / "llm"
+TRAIN_DIR    = ROOT / "data" / "challenge" / "data" / "images" / "train"
+OUT_ROOT     = ROOT / "data" / "pipeline_output"
+OUT_DET      = OUT_ROOT / "detections"
+OUT_OVERLAY  = OUT_ROOT / "overlays"
+OUT_DEPTH    = OUT_ROOT / "depth_maps"
+OUT_GRAPH    = OUT_ROOT / "scene_graphs"
+OUT_CLOUD    = OUT_ROOT / "point_clouds"
+OUT_LLM      = OUT_ROOT / "llm"
+OUT_DISC     = OUT_ROOT / "discarded"
+SAFETY_RULES = ROOT / "action_module" / "SAFETY_RULES.md"
 
-DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Small-hf"
-
-
-# ── depth helper ──────────────────────────────────────────────────────────────
-
-def get_depth_map(depth_pipe, image: Image.Image) -> np.ndarray:
-    """Return a (H, W) float32 raw depth array for the image."""
-    result = depth_pipe(image)
-    return np.array(result["depth"], dtype=np.float32)
+DEPTH_MODEL  = "depth-anything/Depth-Anything-V2-Small-hf"
 
 
-def enrich_with_depth(
-    detections: list[dict],
-    depth_map:  np.ndarray,
-) -> tuple[list[dict], np.ndarray]:
-    """
-    Phase 2: Triple-Fused Depth.
+# ── helpers ───────────────────────────────────────────────────────────────────
 
-    Delegates to depth_module.fused_depth.enrich_detections, which fuses
-    three independent depth signals per detection:
-      - depth_da   : DepthAnything V2 median in bbox          (weight 0.6)
-      - depth_rw   : Real-world size + focal estimate         (weight 0.3)
-      - depth_area : Relative bbox area proxy                 (weight 0.1)
+def _norm_depth(raw: np.ndarray) -> np.ndarray:
+    """Invert DepthAnything disparity → normalised depth (0=close, 1=far)."""
+    d_min, d_max = raw.min(), raw.max()
+    return (1.0 - (raw - d_min) / (d_max - d_min + 1e-6)).astype(np.float32)
 
-    Weights are tunable via DEPTH_W_DA / DEPTH_W_RW / DEPTH_W_AREA env vars.
 
-    Returns
-    -------
-    enriched       : detections with depth_da/depth_rw/depth_area/depth_score/
-                     proximity_label/path_zone added
-    corrected_norm : (H, W) float32, 0=close 1=far, with bbox regions shifted
-                     toward their fused scores (used for the overlay heatmap)
-    """
-    H, W  = depth_map.shape
-    d_min = depth_map.min()
-    d_max = depth_map.max()
-    # DepthAnything outputs disparity: higher value = closer.
-    # Invert so norm: 0 = closest, 1 = farthest (matches proximity thresholds).
-    norm = 1.0 - (depth_map - d_min) / (d_max - d_min + 1e-6)
+def _save_depth(norm_depth: np.ndarray, stem: str) -> None:
+    """Save normalised depth map as a colourised PNG (inferno colormap)."""
+    import cv2
+    d8 = (norm_depth * 255).clip(0, 255).astype(np.uint8)
+    colored = cv2.applyColorMap(d8, cv2.COLORMAP_INFERNO)
+    cv2.imwrite(str(OUT_DEPTH / f"{stem}_depth.png"), colored)
 
-    return fused_enrich(detections, norm, H, W)
+
+def _save_overlay(image: Image.Image, segmented: list[dict], stem: str) -> None:
+    """Save SAM2 mask overlay as PNG."""
+    overlay_rgba = masks_to_overlay(image, segmented)
+    bg = Image.new("RGBA", overlay_rgba.size, (255, 255, 255, 255))
+    bg.paste(overlay_rgba, mask=overlay_rgba.split()[3])
+    bg.convert("RGB").save(str(OUT_OVERLAY / f"{stem}_overlay.png"))
+
+
+def _detection_summary(detections: list[dict]) -> str:
+    """Minimal scene text fallback when lift_3d fails."""
+    if not detections:
+        return "Scene: no objects detected."
+    lines = ["Scene (detection summary — no scene graph available):"]
+    for d in detections:
+        lines.append(
+            f"  - {d.get('label','?')} ({d.get('risk_group','?')}) "
+            f"proximity={d.get('proximity_label','?')} "
+            f"zone={d.get('path_zone','?')} "
+            f"depth={d.get('depth_score','?')}"
+        )
+    return "\n".join(lines)
+
+
+def _serialise(detections: list[dict]) -> list[dict]:
+    """Return a JSON-safe copy of detections (strips numpy arrays like masks)."""
+    out = []
+    for d in detections:
+        entry = {k: v for k, v in d.items() if k != "mask"}
+        for k, v in entry.items():
+            if isinstance(v, np.floating):
+                entry[k] = float(v)
+            elif isinstance(v, np.integer):
+                entry[k] = int(v)
+        out.append(entry)
+    return out
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-def run(n: int = 5, seed: int = 42, conf: float = 0.25) -> None:
-    random.seed(seed if seed is not None else random.randint(0, 2**32))
+def run(n: int = 5, seed: int | None = None, conf: float = 0.25) -> None:
+    random.seed(seed if seed is not None else random.randint(0, 2 ** 32))
 
-    # ── 1. Sample images ──────────────────────────────────────────────────────
-    all_images = (
-        sorted(TRAIN_DIR.glob("*.jpg")) +
-        sorted(TRAIN_DIR.glob("*.jpeg")) +
-        sorted(TRAIN_DIR.glob("*.png"))
+    for d in (OUT_DET, OUT_OVERLAY, OUT_DEPTH, OUT_GRAPH, OUT_CLOUD, OUT_LLM, OUT_DISC):
+        d.mkdir(parents=True, exist_ok=True)
+
+    # ── Sample images ─────────────────────────────────────────────────────────
+    all_images = sorted(
+        p for ext in ("*.jpg", "*.jpeg", "*.png")
+        for p in TRAIN_DIR.glob(ext)
     )
     if not all_images:
         print(f"No images found in {TRAIN_DIR}")
         return
-
     sample = random.sample(all_images, min(n, len(all_images)))
     print(f"Sampled {len(sample)} images from {len(all_images)} total.\n")
 
-    # ── 2. YOLO detection ─────────────────────────────────────────────────────
-    print("Loading YOLO ...")
-    yolo = load_yolo()
+    # ── Load all models once ──────────────────────────────────────────────────
+    print("Loading models ...")
+    llm_client    = load_llm_client()
+    gdino         = load_gdino()
+    sam2_model    = load_sam2()
+    depth_pipe    = hf_pipeline(task="depth-estimation", model=DEPTH_MODEL)
+    graph_builder = SceneGraphBuilder(point_cloud_step=4)
+    safety_rules  = SAFETY_RULES.read_text()
+    print("All models loaded.\n")
 
-    image_detections: dict[str, list[dict]] = {}
-    images_cache:     dict[str, Image.Image] = {}
+    kept_count = 0
+    disc_count = 0
 
-    print("Running YOLO detection ...")
-    for img_path in tqdm(sample, desc="Detection"):
-        image = Image.open(img_path).convert("RGB")
-        dets  = detect_image(yolo, image, score_threshold=conf)
-        dets  = map_detections(dets)          # add risk_group + risk_score
-        image_detections[img_path.name] = dets
-        images_cache[img_path.name]     = image
+    for img_path in tqdm(sample, desc="Pipeline"):
+        stem = img_path.stem
 
-    # ── 3. Filter ─────────────────────────────────────────────────────────────
-    kept, discarded = filter_images(image_detections, conf_threshold=conf)
-    print(f"\nFilter results: {len(kept)} kept, {len(discarded)} discarded.")
-    if discarded:
-        print(f"  Discarded: {discarded}")
-
-    if not kept:
-        print("All images were discarded — nothing relevant detected. Try a larger sample.")
-        return
-
-    # Save discarded detections for reference
-    OUT_DISC.mkdir(parents=True, exist_ok=True)
-    for name in discarded:
-        with open(OUT_DISC / f"{Path(name).stem}.json", "w") as f:
-            json.dump({"image": name, "detections": image_detections[name]}, f, indent=2)
-
-    # ── 4. Depth estimation ───────────────────────────────────────────────────
-    # Initialise the LLM client early — needed for edge rationalization (step 4a)
-    # and scene analysis (step 6).
-    print("\nConnecting to LLM API ...")
-    llm_client = get_llm_client()
-
-    print("Loading DepthAnything V2 ...")
-    depth_pipe = hf_pipeline(task="depth-estimation", model=DEPTH_MODEL)
-
-    OUT_DET.mkdir(parents=True, exist_ok=True)
-    OUT_OVERLAY.mkdir(parents=True, exist_ok=True)
-
-    print("Running depth + building overlays ...")
-    for name in tqdm(kept, desc="Depth + Overlay"):
-        image = images_cache[name]
-        dets  = image_detections[name]
-
-        # Get depth map
-        depth_map = get_depth_map(depth_pipe, image)
-
-        # ── 4a. LLM holistic depth rationalization ────────────────────────────
-        # Ask the LLM to estimate proximity for every detection using full
-        # scene context (perspective, occlusion, shadows, object sizes, etc.).
-        # Result stored as depth_llm per detection → 4th fusion signal.
-        dets = get_llm_depth_signals(image, dets, llm_client)
-
-        # ── 4b. Edge-clip rationalization ─────────────────────────────────────
-        # For bbox edges touching the image boundary, ask the LLM whether the
-        # object is cut off (very close) vs genuinely small/far.
-        # Overrides the naive bbox-area depth signal for those cases.
-        dets = rationalize_edge_detections(image, dets, llm_client)
-
-        # ── 5. Enrich detections + build overlay ─────────────────────────────
-        # enrich_with_depth also returns the bbox-corrected depth map so the
-        # heatmap panel in the overlay reflects the heuristic adjustments.
-        dets_enriched, corrected_depth = enrich_with_depth(dets, depth_map)
-
-        # Save enriched detections JSON
-        with open(OUT_DET / f"{Path(name).stem}.json", "w") as f:
-            json.dump({"image": name, "detections": dets_enriched}, f, indent=2)
-
-        # Save overlay image (right panel shows corrected depth heatmap)
-        overlay_bgr = make_overlay(image, dets_enriched, corrected_depth)
-        cv2.imwrite(str(OUT_OVERLAY / f"{Path(name).stem}_overlay.png"), overlay_bgr)
-
-    # ── 6. LLM scene analysis ─────────────────────────────────────────────────
-    print("\nRunning LLM scene analysis ...")
-    for name in tqdm(kept, desc="LLM"):
-        stem         = Path(name).stem
-        overlay_path = OUT_OVERLAY / f"{stem}_overlay.png"
-        json_path    = OUT_DET    / f"{stem}.json"
-
-        original_path = None
-        for ext in [".jpg", ".jpeg", ".png"]:
-            candidate = TRAIN_DIR / (stem + ext)
-            if candidate.exists():
-                original_path = candidate
-                break
-
-        if original_path is None:
-            print(f"  [SKIP] Original image not found for {stem}")
+        try:
+            image = Image.open(img_path).convert("RGB")
+        except Exception as e:
+            tqdm.write(f"  [{stem}] cannot open image ({e}) — skipping")
+            disc_count += 1
             continue
 
-        llm_process(llm_client, overlay_path, original_path, json_path, OUT_LLM)
+        W, H = image.size
 
-    # ── Summary ───────────────────────────────────────────────────────────────
-    print(f"\nDone.")
-    print(f"  Detections  → {OUT_DET}")
-    print(f"  Overlays    → {OUT_OVERLAY}  ← open these to check the pipeline")
-    print(f"  LLM outputs → {OUT_LLM}      ← scene analysis + navigation decisions")
-    print(f"  Discarded   → {OUT_DISC}")
+        # Step 1 — LLM object prompt
+        try:
+            prompt = get_detection_prompt(llm_client, image)
+        except Exception as e:
+            tqdm.write(f"  [{stem}] prompt failed ({e}) — using default")
+            prompt = "person . vehicle . forklift . barrel . cone . box . ladder ."
+
+        # Step 2 — Grounding DINO
+        try:
+            detections = detect(gdino, image, prompt, score_threshold=conf)
+        except Exception as e:
+            tqdm.write(f"  [{stem}] Grounding DINO failed ({e}) — skipping")
+            disc_count += 1
+            continue
+
+        # Early-out: no detections at all
+        if not detections:
+            tqdm.write(f"  [{stem}] discarded — Grounding DINO found nothing")
+            with open(OUT_DISC / f"{stem}.json", "w") as f:
+                json.dump({"image": img_path.name, "detections": []}, f, indent=2)
+            disc_count += 1
+            continue
+
+        # Step 3 — SAM2 segmentation
+        try:
+            segmented = segment(sam2_model, image, detections)
+        except Exception as e:
+            tqdm.write(f"  [{stem}] SAM2 failed ({e}) — using detections without masks")
+            segmented = [{**d, "mask": np.zeros((H, W), dtype=bool), "mask_score": 0.0}
+                         for d in detections]
+        masks = [d["mask"] for d in segmented]
+
+        # Filter — discard if no risk-relevant objects
+        if not is_interesting(segmented, conf_threshold=conf):
+            tqdm.write(f"  [{stem}] discarded — no relevant objects")
+            with open(OUT_DISC / f"{stem}.json", "w") as f:
+                json.dump({"image": img_path.name, "detections": _serialise(segmented)}, f, indent=2)
+            disc_count += 1
+            continue
+
+        kept_count += 1
+
+        # Step 4 — DepthAnything V2
+        try:
+            raw_depth  = np.array(depth_pipe(image)["depth"], dtype=np.float32)
+            norm_depth = _norm_depth(raw_depth)
+        except Exception as e:
+            tqdm.write(f"  [{stem}] depth failed ({e}) — using uniform depth")
+            norm_depth = np.full((H, W), 0.5, dtype=np.float32)
+
+        # Step 4a — LLM holistic depth signals
+        try:
+            segmented = get_llm_depth_signals(image, segmented, llm_client)
+        except Exception as e:
+            tqdm.write(f"  [{stem}] llm_depth skipped ({e})")
+
+        # Step 4b — Edge rationalization
+        try:
+            segmented = rationalize_edge_detections(image, segmented, llm_client)
+        except Exception as e:
+            tqdm.write(f"  [{stem}] edge_rationalization skipped ({e})")
+
+        # Step 4c — Triple-fused depth enrichment
+        try:
+            enriched, corrected_depth = enrich_detections(segmented, norm_depth, H, W)
+        except Exception as e:
+            tqdm.write(f"  [{stem}] fused_depth failed ({e}) — using raw depth")
+            enriched, corrected_depth = segmented, norm_depth
+
+        # Step 5 — 3D lift + scene graph
+        try:
+            graph = graph_builder.process(
+                depth_map  = corrected_depth,
+                detections = enriched,
+                img_w      = W,
+                img_h      = H,
+                image_id   = stem,
+                masks      = masks,
+            )
+            graph_builder.save(graph, OUT_GRAPH)
+            scene_text = graph.text
+        except Exception as e:
+            tqdm.write(f"  [{stem}] scene graph failed ({e}) — using detection summary")
+            scene_text = _detection_summary(enriched)
+
+        # Save depth map PNG
+        try:
+            _save_depth(corrected_depth, stem)
+        except Exception as e:
+            tqdm.write(f"  [{stem}] depth map save failed ({e})")
+
+        # Save point cloud visualisation PNG
+        try:
+            visualize_3d(
+                graph,
+                corrected_depth,
+                save_path = OUT_CLOUD / f"{stem}_pointcloud.png",
+                show      = False,
+            )
+        except Exception as e:
+            tqdm.write(f"  [{stem}] point cloud viz failed ({e})")
+
+        # Step 6 — LLM action decision
+        result = analyse_with_scene_graph(
+            client           = llm_client,
+            original_path    = img_path,
+            scene_graph_text = scene_text,
+            safety_rules     = safety_rules,
+        )
+
+        # Save outputs
+        with open(OUT_DET / f"{stem}.json", "w") as f:
+            json.dump({"image": img_path.name, "detections": _serialise(enriched)}, f, indent=2)
+
+        try:
+            _save_overlay(image, segmented, stem)
+        except Exception as e:
+            tqdm.write(f"  [{stem}] overlay failed ({e})")
+
+        with open(OUT_LLM / f"{stem}_analysis.json", "w") as f:
+            json.dump(result, f, indent=2)
+
+        tqdm.write(
+            f"  [{stem}] {result['action']} ({result['confidence']:.2f}) — {result['reasoning'][:80]}"
+        )
+
+    print(f"\nDone.  Kept: {kept_count}  Discarded: {disc_count}")
+    print(f"  Detections   → {OUT_DET}")
+    print(f"  Overlays     → {OUT_OVERLAY}")
+    print(f"  Depth maps   → {OUT_DEPTH}")
+    print(f"  Scene graphs → {OUT_GRAPH}")
+    print(f"  Point clouds → {OUT_CLOUD}")
+    print(f"  Decisions    → {OUT_LLM}")
+    print(f"  Discarded    → {OUT_DISC}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run the pre-processing pipeline")
-    parser.add_argument("--n",    type=int,   default=5,    help="Number of images to sample")
-    parser.add_argument("--seed", type=int,   default=None, help="Random seed (omit for true random)")
-    parser.add_argument("--conf", type=float, default=0.25, help="YOLO confidence threshold")
+    parser = argparse.ArgumentParser(description="Perception-to-decision pipeline")
+    parser.add_argument("--n",    type=int,   default=5,    help="Images to sample")
+    parser.add_argument("--seed", type=int,   default=None, help="Random seed")
+    parser.add_argument("--conf", type=float, default=0.25, help="Detection confidence threshold")
     args = parser.parse_args()
 
     run(n=args.n, seed=args.seed, conf=args.conf)

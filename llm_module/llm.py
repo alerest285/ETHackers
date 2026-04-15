@@ -25,6 +25,7 @@ import argparse
 import base64
 import json
 import os
+import re
 from pathlib import Path
 
 from openai import OpenAI
@@ -143,6 +144,104 @@ def analyse(
         max_tokens=max_tokens,
     )
     return response.choices[0].message.content.strip()
+
+
+# ── scene graph decision ──────────────────────────────────────────────────────
+
+def analyse_with_scene_graph(
+    client:           OpenAI,
+    original_path:    Path,
+    scene_graph_text: str,
+    safety_rules:     str,
+    max_tokens:       int = 512,
+) -> dict:
+    """
+    Decide STOP / SLOW / CONTINUE from a scene graph + safety rules.
+
+    The safety rules (from action_module/SAFETY_RULES.md) are injected into
+    the system prompt so the model reasons within the established heuristics.
+    The original image is included for visual grounding.
+
+    Returns:
+        {"action": "STOP"|"SLOW"|"CONTINUE", "confidence": float, "reasoning": str}
+    Falls back to rule-based decision if the LLM call or parse fails.
+    """
+    system = (
+        SYSTEM_PROMPT
+        + "\n\n"
+        + "## Safety Rules\n\n"
+        + safety_rules
+        + "\n\n"
+        + "You must apply the above rules strictly. "
+        + "Respond ONLY with a JSON object — no markdown, no extra text:\n"
+        + '{"action": "STOP"|"SLOW"|"CONTINUE", "confidence": <float 0-1>, "reasoning": "<one sentence>"}'
+    )
+
+    user_content = [
+        _image_message(original_path),
+        {
+            "type": "text",
+            "text": (
+                "Scene graph from the perception pipeline:\n\n"
+                + scene_graph_text
+                + "\n\nApply the safety rules and return your JSON decision."
+            ),
+        },
+    ]
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user_content},
+            ],
+            max_tokens=max_tokens,
+            temperature=0.1,
+        )
+        raw = response.choices[0].message.content.strip()
+
+        # Try direct JSON parse
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            # Extract JSON object from response if wrapped in prose
+            m = re.search(r'\{[^{}]+\}', raw, re.DOTALL)
+            if m:
+                parsed = json.loads(m.group())
+            else:
+                raise ValueError(f"No JSON found in response: {raw}")
+
+        action = parsed.get("action", "").upper()
+        if action not in ("STOP", "SLOW", "CONTINUE"):
+            raise ValueError(f"Invalid action: {action}")
+
+        return {
+            "action":     action,
+            "confidence": round(float(parsed.get("confidence", 0.5)), 4),
+            "reasoning":  str(parsed.get("reasoning", "No reasoning provided.")),
+        }
+
+    except Exception as e:
+        print(f"  [LLM fallback] {e}")
+        return _rule_fallback(scene_graph_text)
+
+
+def _rule_fallback(scene_graph_text: str) -> dict:
+    """
+    Minimal rule-based fallback when the LLM is unavailable.
+    Scans the scene graph text for risk signals.
+    """
+    text = scene_graph_text.lower()
+    if "close" in text and ("human" in text or "person" in text):
+        return {"action": "STOP",     "confidence": 0.80, "reasoning": "Rule fallback: HUMAN at CLOSE proximity."}
+    if "close" in text and "vehicle" in text and "center" in text:
+        return {"action": "STOP",     "confidence": 0.75, "reasoning": "Rule fallback: VEHICLE at CLOSE proximity in CENTER zone."}
+    if "human" in text or "vehicle" in text:
+        return {"action": "SLOW",     "confidence": 0.65, "reasoning": "Rule fallback: HUMAN or VEHICLE detected."}
+    if "safety_marker" in text or "obstacle" in text:
+        return {"action": "SLOW",     "confidence": 0.55, "reasoning": "Rule fallback: obstacle or safety marker present."}
+    return     {"action": "CONTINUE", "confidence": 0.70, "reasoning": "Rule fallback: no significant hazards detected."}
 
 
 # ── file-level helpers ────────────────────────────────────────────────────────

@@ -94,16 +94,26 @@ def segment(
     with torch.no_grad():
         outputs = model.model(**inputs)
 
-    # post_process_masks returns List[List[Tensor(num_masks, H, W)]]
-    # one outer list per image, one inner list per box
-    masks_per_box = model.processor.post_process_masks(
-        outputs.pred_masks,
-        inputs["original_sizes"],
-        inputs["reshaped_input_sizes"],
-    )[0]   # index 0 = first (only) image → List[Tensor(num_candidates, H, W)]
+    # Upsample masks manually — avoids processor API version differences.
+    # outputs.pred_masks: (1, N, num_candidates, H_low, W_low)
+    # We upsample each to (H, W) using bilinear interpolation.
+    import torch.nn.functional as F
 
-    # iou_scores shape: (1, N, num_candidates)
-    iou_scores = outputs.iou_scores[0]  # (N, num_candidates)
+    pred = outputs.pred_masks.squeeze(0).float().contiguous()  # (N, C, H_low, W_low)
+    N, C, h_low, w_low = pred.shape
+    # reshape to (N*C, 1, H_low, W_low), upsample, reshape back
+    upsampled = F.interpolate(
+        pred.reshape(N * C, 1, h_low, w_low),
+        size=(H, W),
+        mode="bilinear",
+        align_corners=False,
+    ).reshape(N, C, H, W)  # (N, num_candidates, H, W)
+
+    # Convert to list of tensors, one per box (each tensor: (num_candidates, H, W))
+    masks_per_box = [upsampled[i] for i in range(N)]
+
+    # iou_scores: guard against missing field
+    iou_scores = outputs.iou_scores[0] if hasattr(outputs, "iou_scores") else torch.ones(N, C)
 
     results = []
     for i, det in enumerate(detections):
@@ -113,7 +123,7 @@ def segment(
             candidates   = masks_per_box[i]          # (num_candidates, H, W)
             scores       = iou_scores[i]              # (num_candidates,)
             best_idx     = int(scores.argmax())
-            best_mask    = candidates[best_idx].cpu().numpy().astype(bool)
+            best_mask    = (candidates[best_idx].cpu().numpy() > 0.0).astype(bool)
             best_score   = round(float(scores[best_idx]), 4)
 
             result["mask"]       = best_mask

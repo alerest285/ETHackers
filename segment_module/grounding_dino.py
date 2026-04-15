@@ -135,13 +135,15 @@ def detect(
     results = model.processor.post_process_grounded_object_detection(
         outputs,
         inputs.input_ids,
-        box_threshold=score_threshold,
+        threshold=score_threshold,
         text_threshold=score_threshold * 0.8,
         target_sizes=[(H, W)],
     )[0]
 
     detections = []
-    for box, score, label in zip(results["boxes"], results["scores"], results["labels"]):
+    # Use text_labels (string names) — "labels" returns integer IDs in transformers ≥ 4.51
+    label_key = "text_labels" if "text_labels" in results else "labels"
+    for box, score, label in zip(results["boxes"], results["scores"], results[label_key]):
         x1, y1, x2, y2 = [round(float(v), 2) for v in box]
         score_f  = round(float(score), 4)
         label_s  = label.strip().lower()
