@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ETHackers — Robot Vision Pipeline</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      padding: 20px 32px;
+      border-bottom: 1px solid #1e2535;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header h1 { font-size: 18px; font-weight: 600; letter-spacing: -0.3px; }
+    header span { font-size: 13px; color: #64748b; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e;
+           box-shadow: 0 0 6px #22c55e; flex-shrink: 0; }
+
+    main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 340px 1fr;
+      gap: 0;
+    }
+
+    /* ── Left panel ── */
+    .panel {
+      border-right: 1px solid #1e2535;
+      padding: 28px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 28px;
+    }
+
+    .section-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #64748b;
+      margin-bottom: 12px;
+    }
+
+    /* Upload zone */
+    #drop-zone {
+      border: 2px dashed #2d3748;
+      border-radius: 10px;
+      padding: 32px 16px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      position: relative;
+    }
+    #drop-zone:hover, #drop-zone.dragover {
+      border-color: #3b82f6;
+      background: rgba(59,130,246,0.05);
+    }
+    #drop-zone input[type="file"] {
+      position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+    }
+    #drop-zone .icon { font-size: 32px; margin-bottom: 10px; }
+    #drop-zone p { font-size: 13px; color: #94a3b8; line-height: 1.5; }
+    #drop-zone p strong { color: #cbd5e1; }
+
+    #preview-wrap { display: none; flex-direction: column; align-items: center; gap: 8px; }
+    #preview-img  { max-height: 140px; border-radius: 6px; border: 1px solid #2d3748; }
+    #preview-name { font-size: 12px; color: #64748b; }
+    #change-btn   {
+      font-size: 11px; color: #3b82f6; background: none; border: none;
+      cursor: pointer; text-decoration: underline;
+    }
+
+    /* Pipeline stages */
+    .stage {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-radius: 8px;
+      border: 1px solid #1e2535;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+      user-select: none;
+    }
+    .stage:hover:not(.disabled) { border-color: #3b82f6; background: rgba(59,130,246,0.04); }
+    .stage.selected  { border-color: #3b82f6; background: rgba(59,130,246,0.08); }
+    .stage.disabled  { opacity: 0.38; cursor: not-allowed; }
+
+    .stage-check {
+      width: 18px; height: 18px; border-radius: 4px;
+      border: 2px solid #2d3748; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .stage.selected .stage-check { background: #3b82f6; border-color: #3b82f6; }
+    .stage-check svg { display: none; }
+    .stage.selected .stage-check svg { display: block; }
+
+    .stage-info { flex: 1; }
+    .stage-info .name  { font-size: 14px; font-weight: 500; }
+    .stage-info .desc  { font-size: 12px; color: #64748b; margin-top: 2px; }
+
+    .badge {
+      font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 20px;
+      letter-spacing: 0.04em; flex-shrink: 0;
+    }
+    .badge.ready  { background: rgba(34,197,94,0.12); color: #22c55e; }
+    .badge.soon   { background: rgba(100,116,139,0.12); color: #64748b; }
+
+    /* Colormap selector */
+    .colormap-row {
+      display: flex; gap: 8px; flex-wrap: wrap;
+    }
+    .cm-btn {
+      padding: 5px 12px; border-radius: 6px; border: 1px solid #2d3748;
+      background: none; color: #94a3b8; font-size: 12px; cursor: pointer;
+      transition: all 0.15s;
+    }
+    .cm-btn:hover    { border-color: #3b82f6; color: #e2e8f0; }
+    .cm-btn.active   { border-color: #3b82f6; background: rgba(59,130,246,0.1); color: #e2e8f0; }
+
+    /* Run button */
+    #run-btn {
+      width: 100%; padding: 12px;
+      background: #3b82f6; color: white;
+      border: none; border-radius: 8px;
+      font-size: 14px; font-weight: 600; cursor: pointer;
+      transition: background 0.15s, opacity 0.15s;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+    }
+    #run-btn:hover:not(:disabled) { background: #2563eb; }
+    #run-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .spinner {
+      width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: white; border-radius: 50%;
+      animation: spin 0.7s linear infinite; display: none;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Right panel (results) ── */
+    .results {
+      padding: 28px 32px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    .empty-state {
+      flex: 1; display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 12px; color: #334155;
+    }
+    .empty-state .big-icon { font-size: 48px; }
+    .empty-state p { font-size: 14px; }
+
+    .result-block { display: flex; flex-direction: column; gap: 12px; }
+    .result-block .result-label {
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.08em; color: #64748b;
+    }
+
+    .image-row {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+    }
+    .image-card {
+      background: #161b27; border: 1px solid #1e2535; border-radius: 8px;
+      overflow: hidden;
+    }
+    .image-card .card-label {
+      padding: 8px 12px; font-size: 11px; color: #64748b; border-bottom: 1px solid #1e2535;
+    }
+    .image-card img { width: 100%; display: block; }
+
+    .error-box {
+      background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.25);
+      border-radius: 8px; padding: 14px 16px; font-size: 13px; color: #fca5a5;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="dot"></div>
+  <h1>Robot Vision Pipeline</h1>
+  <span>ETHackers · Barcelona 2025</span>
+</header>
+
+<main>
+
+  <!-- ── Left panel ── -->
+  <div class="panel">
+
+    <!-- Upload -->
+    <div>
+      <div class="section-label">Image</div>
+      <div id="drop-zone">
+        <input type="file" id="file-input" accept="image/*" />
+        <div id="upload-prompt">
+          <div class="icon">🖼️</div>
+          <p><strong>Click or drag</strong> an image here</p>
+          <p>JPG, PNG, WEBP</p>
+        </div>
+        <div id="preview-wrap">
+          <img id="preview-img" src="" alt="preview" />
+          <span id="preview-name"></span>
+          <button id="change-btn" onclick="clearImage(event)">Change image</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Pipeline stages -->
+    <div>
+      <div class="section-label">Pipeline stages</div>
+      <div style="display:flex;flex-direction:column;gap:8px;">
+
+        <div class="stage selected" data-stage="depth" onclick="toggleStage(this)">
+          <div class="stage-check">
+            <svg width="10" height="8" viewBox="0 0 10 8" fill="none">
+              <path d="M1 4L3.5 6.5L9 1" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div class="stage-info">
+            <div class="name">Depth Estimation</div>
+            <div class="desc">Depth Anything V2 — proximity + path zone</div>
+          </div>
+          <span class="badge ready">Ready</span>
+        </div>
+
+        <div class="stage disabled" data-stage="detection">
+          <div class="stage-check"></div>
+          <div class="stage-info">
+            <div class="name">Detection</div>
+            <div class="desc">Object detection + bounding boxes</div>
+          </div>
+          <span class="badge soon">Soon</span>
+        </div>
+
+        <div class="stage disabled" data-stage="filtering">
+          <div class="stage-check"></div>
+          <div class="stage-info">
+            <div class="name">Filtering</div>
+            <div class="desc">Deduplicate + clean noisy detections</div>
+          </div>
+          <span class="badge soon">Soon</span>
+        </div>
+
+        <div class="stage disabled" data-stage="decision">
+          <div class="stage-check"></div>
+          <div class="stage-info">
+            <div class="name">Decision</div>
+            <div class="desc">STOP / SLOW / CONTINUE + reasoning</div>
+          </div>
+          <span class="badge soon">Soon</span>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Colormap (only relevant when depth is selected) -->
+    <div id="colormap-section">
+      <div class="section-label">Depth colormap</div>
+      <div class="colormap-row">
+        <button class="cm-btn active" data-cm="inferno"  onclick="selectCm(this)">Inferno</button>
+        <button class="cm-btn"        data-cm="magma"    onclick="selectCm(this)">Magma</button>
+        <button class="cm-btn"        data-cm="plasma"   onclick="selectCm(this)">Plasma</button>
+        <button class="cm-btn"        data-cm="viridis"  onclick="selectCm(this)">Viridis</button>
+        <button class="cm-btn"        data-cm="jet"      onclick="selectCm(this)">Jet</button>
+      </div>
+    </div>
+
+    <!-- Run -->
+    <button id="run-btn" onclick="run()" disabled>
+      <div class="spinner" id="spinner"></div>
+      <span id="run-label">Run pipeline</span>
+    </button>
+
+  </div>
+
+  <!-- ── Right panel ── -->
+  <div class="results" id="results">
+    <div class="empty-state">
+      <div class="big-icon">🤖</div>
+      <p>Upload an image and select pipeline stages to get started.</p>
+    </div>
+  </div>
+
+</main>
+
+<script>
+  let selectedFile = null;
+  let selectedCm   = "inferno";
+
+  // ── File handling ──────────────────────────────────────────────────────────
+
+  const dropZone   = document.getElementById("drop-zone");
+  const fileInput  = document.getElementById("file-input");
+  const uploadPmpt = document.getElementById("upload-prompt");
+  const previewWrp = document.getElementById("preview-wrap");
+  const previewImg = document.getElementById("preview-img");
+  const previewNm  = document.getElementById("preview-name");
+  const runBtn     = document.getElementById("run-btn");
+
+  fileInput.addEventListener("change", e => setFile(e.target.files[0]));
+
+  dropZone.addEventListener("dragover",  e => { e.preventDefault(); dropZone.classList.add("dragover"); });
+  dropZone.addEventListener("dragleave", ()  => dropZone.classList.remove("dragover"));
+  dropZone.addEventListener("drop", e => {
+    e.preventDefault();
+    dropZone.classList.remove("dragover");
+    const f = e.dataTransfer.files[0];
+    if (f && f.type.startsWith("image/")) setFile(f);
+  });
+
+  function setFile(f) {
+    selectedFile = f;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      previewImg.src   = ev.target.result;
+      previewNm.textContent = f.name;
+      uploadPmpt.style.display = "none";
+      previewWrp.style.display = "flex";
+    };
+    reader.readAsDataURL(f);
+    updateRunBtn();
+  }
+
+  function clearImage(e) {
+    e.stopPropagation();
+    selectedFile = null;
+    fileInput.value = "";
+    previewImg.src  = "";
+    uploadPmpt.style.display = "";
+    previewWrp.style.display = "none";
+    updateRunBtn();
+  }
+
+  // ── Stage toggling ─────────────────────────────────────────────────────────
+
+  function toggleStage(el) {
+    if (el.classList.contains("disabled")) return;
+    el.classList.toggle("selected");
+    updateRunBtn();
+  }
+
+  function getSelectedStages() {
+    return [...document.querySelectorAll(".stage.selected:not(.disabled)")]
+      .map(el => el.dataset.stage);
+  }
+
+  function updateRunBtn() {
+    const hasFile   = !!selectedFile;
+    const hasStage  = getSelectedStages().length > 0;
+    runBtn.disabled = !(hasFile && hasStage);
+  }
+
+  // ── Colormap ───────────────────────────────────────────────────────────────
+
+  function selectCm(btn) {
+    document.querySelectorAll(".cm-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    selectedCm = btn.dataset.cm;
+  }
+
+  // ── Run ────────────────────────────────────────────────────────────────────
+
+  async function run() {
+    if (!selectedFile) return;
+
+    const stages = getSelectedStages();
+    if (!stages.length) return;
+
+    // Show spinner
+    runBtn.disabled = true;
+    document.getElementById("spinner").style.display = "block";
+    document.getElementById("run-label").textContent = "Running…";
+
+    const form = new FormData();
+    form.append("image",    selectedFile);
+    form.append("stages",   stages.join(","));
+    form.append("colormap", selectedCm);
+
+    try {
+      const res  = await fetch("/run", { method: "POST", body: form });
+      const data = await res.json();
+      renderResults(data, stages);
+    } catch (err) {
+      renderError(err.toString());
+    } finally {
+      runBtn.disabled = false;
+      document.getElementById("spinner").style.display = "none";
+      document.getElementById("run-label").textContent = "Run pipeline";
+      updateRunBtn();
+    }
+  }
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+
+  function renderResults(data, stages) {
+    const container = document.getElementById("results");
+
+    if (data.error) { renderError(data.error); return; }
+
+    let html = "";
+
+    if (data.depth) {
+      html += `
+        <div class="result-block">
+          <div class="result-label">Depth Estimation</div>
+          <div class="image-row">
+            <div class="image-card">
+              <div class="card-label">Original</div>
+              <img src="data:image/png;base64,${data.depth.original}" />
+            </div>
+            <div class="image-card">
+              <div class="card-label">Depth heatmap</div>
+              <img src="data:image/png;base64,${data.depth.heatmap}" />
+            </div>
+          </div>
+        </div>`;
+    }
+
+    container.innerHTML = html || `<div class="empty-state"><p>No output returned.</p></div>`;
+  }
+
+  function renderError(msg) {
+    document.getElementById("results").innerHTML =
+      `<div class="error-box">Error: ${msg}</div>`;
+  }
+</script>
+
+</body>
+</html>
