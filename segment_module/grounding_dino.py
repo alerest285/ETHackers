@@ -76,6 +76,7 @@ def detect(
     text_prompt:     str,
     score_threshold: float = 0.30,
     learn_client=None,
+    interactive:     bool = False,
 ) -> list[dict]:
     """
     Run Grounding DINO on a single image with the given text prompt.
@@ -85,10 +86,11 @@ def detect(
         image:           PIL image.
         text_prompt:     Dot-separated phrases, e.g. "person . forklift . cone ."
         score_threshold: Minimum detection confidence.
-        learn_client:    Optional OpenAI client. When provided, any detection
-                         whose label falls back to UNKNOWN is classified into
-                         one of the 6 real groups and the mapping is persisted
-                         to data/learned_aliases.json for future runs.
+        learn_client:    Optional OpenAI client. When provided AND
+                         interactive is False, any UNKNOWN-fallback label is
+                         classified automatically by GPT-4o-mini and persisted.
+        interactive:     If True, prompt the user on stdin to classify each
+                         new UNKNOWN label. Takes precedence over learn_client.
 
     Returns:
         List of detection dicts sorted by descending score.
@@ -136,10 +138,13 @@ def detect(
 
     detections.sort(key=lambda d: d["score"], reverse=True)
 
-    # Optional auto-learning: classify UNKNOWN labels via GPT-4o-mini and
-    # persist them to data/learned_aliases.json so subsequent runs skip this.
-    if learn_client is not None and any(d.get("unmapped") for d in detections):
-        from segment_module.llm_objects import classify_and_learn
-        classify_and_learn(learn_client, detections)
+    # Optional learning of UNKNOWN labels. Interactive mode wins if both set.
+    if any(d.get("unmapped") for d in detections):
+        if interactive:
+            from src.label_ontology import classify_and_learn_interactive
+            classify_and_learn_interactive(detections)
+        elif learn_client is not None:
+            from segment_module.llm_objects import classify_and_learn
+            classify_and_learn(learn_client, detections)
 
     return detections

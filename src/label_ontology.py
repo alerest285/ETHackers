@@ -94,6 +94,9 @@ ALIAS_GROUPS: dict[str, list[list[str]]] = {
         ["stop sign", "stop board"],
         ["traffic light", "traffic signal", "stoplight"],
         ["wet floor sign", "caution wet floor", "wet floor warning", "caution sign"],
+        # Spills / puddles — slip hazards, not obstacles
+        ["spill", "liquid spill", "oil spill", "chemical spill"],
+        ["puddle", "water puddle", "wet patch", "wet floor"],
         ["barrier", "safety barrier", "jersey barrier", "water barrier"],
         ["caution tape", "warning tape", "hazard tape", "barrier tape",
          "yellow tape", "danger tape", "safety tape"],
@@ -123,6 +126,20 @@ ALIAS_GROUPS: dict[str, list[list[str]]] = {
         ["machine", "industrial machine"],
         ["cable", "wire", "cable bundle"],
         ["table", "work table", "desk"],
+        # Animals — living but classed as physical obstructions within the 6 groups.
+        # If you want stricter handling (unpredictable movement), override via
+        # the interactive classifier to promote them to HUMAN- or VEHICLE-tier.
+        ["dog", "puppy", "stray dog"],
+        ["cat", "kitten", "stray cat"],
+        ["bird", "pigeon", "chicken", "duck"],
+        ["animal", "livestock", "cow", "horse", "sheep", "goat", "pig"],
+        ["rodent", "rat", "mouse"],
+        # Food / floor debris — small items to avoid driving over
+        ["bottle", "water bottle", "plastic bottle", "glass bottle"],
+        ["can", "soda can", "tin can", "aluminium can", "aluminum can"],
+        ["cup", "paper cup", "coffee cup", "disposable cup"],
+        ["trash", "litter", "rubbish", "debris", "waste"],
+        ["food", "food item", "apple", "banana", "sandwich", "bread", "food wrapper"],
     ],
 
     # ── VEHICLE (risk 4) — motorized or large mobile objects ─────────────────
@@ -333,6 +350,89 @@ def get_canonical(category_name: str) -> str:
     return norm
 
 
+# ---------------------------------------------------------------------------
+# Interactive classifier — human-in-the-loop
+# ---------------------------------------------------------------------------
+
+_INTERACTIVE_MENU: list[tuple[str, str, str]] = [
+    ("1", "SURFACE",       "navigable ground (floor, road, parking lot)"),
+    ("2", "BACKGROUND",    "walls, ceiling, sky, windows"),
+    ("3", "SAFETY_MARKER", "cones, signs, barriers, caution tape, spills"),
+    ("4", "OBSTACLE",      "static objects: boxes, pallets, animals, debris"),
+    ("5", "VEHICLE",       "forklifts, cars, trucks, AGVs"),
+    ("6", "HUMAN",         "persons, body parts, protective gear"),
+]
+
+
+def classify_label_interactive(label: str) -> str:
+    """Prompt the user on stdin to classify `label` into one of the 6 groups.
+
+    Returns the chosen group name, or "" if the user skips (label stays UNKNOWN).
+    Loops until valid input is given. Accepts:
+      - The menu number ("1"–"6")
+      - The group name, case-insensitive ("obstacle", "HUMAN")
+      - "s" / "skip" to leave the label as UNKNOWN
+    """
+    print(f"\n[label_ontology] New label needs classification: {label!r}")
+    print("  Pick a group:")
+    for num, name, hint in _INTERACTIVE_MENU:
+        print(f"    {num}) {name:<15s} - {hint}")
+    print("    s) skip (leave as UNKNOWN, risk=3)")
+
+    by_num  = {num: name for num, name, _ in _INTERACTIVE_MENU}
+    by_name = {name for _, name, _ in _INTERACTIVE_MENU}
+
+    while True:
+        try:
+            choice = input("  > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("  (input closed — skipping)")
+            return ""
+        if not choice:
+            continue
+        if choice in by_num:
+            return by_num[choice]
+        if choice.upper() in by_name:
+            return choice.upper()
+        if choice.lower() in ("s", "skip"):
+            return ""
+        print("  invalid — enter 1–6, a group name, or 's' to skip")
+
+
+def classify_and_learn_interactive(detections: list[dict]) -> list[dict]:
+    """Human-in-the-loop counterpart to `llm_objects.classify_and_learn`.
+
+    For every detection flagged `unmapped=True`, prompt the user once per
+    unique label, persist the answer via `register_learned_alias`, and
+    rewrite `risk_group` / `risk_score` in place.
+
+    Skipped labels stay UNKNOWN (risk=3) — safe default. On the next run the
+    user is prompted again unless they classify it.
+    """
+    unique_unmapped: dict[str, str] = {}
+    for det in detections:
+        if not det.get("unmapped"):
+            continue
+        lbl = (det.get("label") or "").strip().lower()
+        if lbl and lbl not in unique_unmapped:
+            unique_unmapped[lbl] = classify_label_interactive(lbl)
+
+    for lbl, grp in unique_unmapped.items():
+        if grp:  # empty string = user skipped
+            register_learned_alias(lbl, grp)
+
+    # Re-resolve every detection so learned entries update in place.
+    for det in detections:
+        r = get_risk_group(det.get("label", ""))
+        det["risk_group"] = r["group"]
+        det["risk_score"] = r["risk_score"]
+        if r.get("unmapped"):
+            det["unmapped"] = True
+        else:
+            det.pop("unmapped", None)
+    return detections
+
+
 def map_detections(detections: list[dict]) -> list[dict]:
     """Enrich a list of detection dicts with risk_group and risk_score.
 
@@ -376,6 +476,15 @@ if __name__ == "__main__":
         ("parking lot", "SURFACE", 0),
         ("floor marking", "SURFACE", 0),
         ("ground", "SURFACE", 0),
+        ("dog", "OBSTACLE", 3),
+        ("cat", "OBSTACLE", 3),
+        ("bird", "OBSTACLE", 3),
+        ("cow", "OBSTACLE", 3),
+        ("bottle", "OBSTACLE", 3),
+        ("apple", "OBSTACLE", 3),
+        ("trash", "OBSTACLE", 3),
+        ("spill", "SAFETY_MARKER", 2),
+        ("puddle", "SAFETY_MARKER", 2),
         ("unknown_label", "UNKNOWN", 3),   # fail-safe fallback, flagged for learning
     ]
     all_pass = True
