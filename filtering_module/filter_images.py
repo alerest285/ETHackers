@@ -70,6 +70,7 @@ def filter_from_detections(
     filtered_ids: list[int] = []
     removed_ids: list[int] = []
     removal_reasons: dict[int, str] = {}
+    filtered_detections: list[dict] = []
 
     group_counts: dict[str, int] = defaultdict(int)
 
@@ -89,6 +90,7 @@ def filter_from_detections(
                 continue
 
         filtered_ids.append(img_id)
+        filtered_detections.extend(dets)
         for det in dets:
             group_counts[det.get("risk_group", "BACKGROUND")] += 1
 
@@ -102,6 +104,9 @@ def filter_from_detections(
     with open(output_path / "removed_image_ids.json", "w") as f:
         json.dump(removed_ids, f)
 
+    with open(output_path / "filtered_detections.json", "w") as f:
+        json.dump(filtered_detections, f, indent=2)
+
     stats = {
         "total_images": len(all_image_ids),
         "kept_images": len(filtered_ids),
@@ -112,6 +117,7 @@ def filter_from_detections(
             "background_only": sum(1 for r in removal_reasons.values() if r == "background_only"),
         },
         "detections_by_group_in_kept": dict(group_counts),
+        "kept_detections": len(filtered_detections),
     }
 
     with open(output_path / "filter_stats.json", "w") as f:
@@ -127,6 +133,10 @@ def filter_from_detections(
     for group, count in sorted(group_counts.items(), key=lambda x: -x[1]):
         print(f"  {group:15s}: {count}")
     print(f"\nOutput → {output_path}")
+    print(f"  filtered_image_ids.json  ({len(filtered_ids)} images)")
+    print(f"  removed_image_ids.json   ({len(removed_ids)} images)")
+    print(f"  filtered_detections.json ({len(filtered_detections)} detections) ← feed to depth module")
+    print(f"  filter_stats.json")
 
     return stats
 

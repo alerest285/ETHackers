@@ -19,31 +19,37 @@
 ## Architecture
 
 ```
-Raw Images (train/val/test)
-        │
-        ▼
-┌─────────────────────────────┐
-│  Phase 2: Detection+Labels  │  YOLOv8s fine-tuned on 134K annotated examples
-│   └─ SAM 2 segmentation     │  SAM 2 box-prompted → pixel mask per object
-└────────────┬────────────────┘
-             │ {image_id, category_id, bbox, mask, score, risk_group}
+Raw Image
+    │
+    ▼
+┌─────────────────────────────────┐
+│ Phase 1: Grounding DINO + SAM   │  Text prompts: 5 semantic groups
+│  → bbox per object + pixel mask │  GroundingDINO → boxes → SAM2 → masks
+└────────────┬────────────────────┘
+             │ {risk_group, bbox, mask, score}
              ▼
-┌─────────────────────────────┐
-│  Phase 3: Image Filtering   │  Discard images with ZERO relevant detections
-│   (conf > 0.25, any class)  │  → saves ~30% downstream API cost
-└────────────┬────────────────┘
-             │ filtered image list
+┌─────────────────────────────────┐
+│ Phase 2: Triple-Fused Depth     │  Per segmented object:
+│  Input 1: DepthAnything V2      │  → depth_da   (monocular depth map, median in mask)
+│  Input 2: Real-world size ref   │  → depth_rw   (known object height + focal estimate)
+│  Input 3: Relative bbox area    │  → depth_area (bbox_area / frame_area, inverted)
+│  → weighted fusion → depth_score│  Weights: 0.6 / 0.3 / 0.1 (env-var tunable)
+└────────────┬────────────────────┘
+             │ {depth_score, proximity_label, path_zone}
              ▼
-┌─────────────────────────────┐
-│  Phase 4: Depth Analysis    │  DepthAnything V2 on each filtered image
-│   └─ Per-object depth stats │  depth_mean, depth_min per bbox region
-└────────────┬────────────────┘
-             │ {image_id, bbox, risk_group, depth_mean, depth_min}
+┌─────────────────────────────────┐
+│ Phase 3: 3D Lift → Scene Graph  │  Unproject depth map → point cloud (pinhole model)
+│  Per-object 3D cluster          │  Extract 3D centroid + extent per mask
+│  → spatial relations            │  Edges: distance, relative position, blocking
+│  → serialised scene graph text  │  Output: structured text for LLM
+└────────────┬────────────────────┘
+             │ scene graph (text) + detections
              ▼
-┌─────────────────────────────┐
-│  Phase 5: Decision Engine   │  Rule-based STOP/SLOW/CONTINUE
-│  + VLM Ensemble             │  GPT-4V + Claude Vision ensemble on test set
-└────────────┬────────────────┘
+┌─────────────────────────────────┐
+│ Phase 4: LLM Decision Engine    │  Rule engine (deterministic, always runs first)
+│  Rule engine + LLM backend      │  + pluggable LLM (Qwen2.5-VL / LLaMA / GPT-4o)
+│  → STOP / SLOW / CONTINUE       │  Ensemble: agree → avg conf; disagree → conservative
+└────────────┬────────────────────┘
              ▼
       Submission JSON
 ```
@@ -63,7 +69,7 @@ Maps the 27 raw categories → 5 groups with risk scores:
 | BACKGROUND | None | 1 | undetected / nothing matched |
 
 **Note on duplicates:** box/Box, barrel/Barrel, ladder/Ladder, suitcase/Suitcase are the same object
-with inconsistent casing — normalized at ontology load time (lowercase + strip).
+with inconsistent casing — normalised at ontology load time (lowercase + strip).
 
 ---
 
@@ -75,213 +81,332 @@ pip install -r requirements.txt
 ```
 
 ### 0.2 Download dataset
-Images go to Northflank volume (or local `data/images/`). Annotation JSONs already present.
 ```
 data/
-  images/train/    # ~17,500 images
-  images/val/      # ~3,800 images
-  images/test/     # ~3,800 images
-  annotations/train.json   ✅ present
-  annotations/val.json     ✅ present
-  annotations/test.json    ✅ present
+  challenge/data/
+    images/train/    # ~17,500 images
+    images/val/      # ~3,800 images
+    images/test/     # ~3,800 images
+    annotations/train.json   ✅ present
+    annotations/val.json     ✅ present
+    annotations/test.json    ✅ present
 ```
 
 ### 0.3 Project structure
 ```
-pb_code/
-  src/
-    label_ontology.py        # 27→5 group mapping
-    coco_to_yolo.py          # Convert COCO → YOLO format
-    yolo_train.py            # Fine-tune YOLOv8s
-    sam_wrapper.py           # SAM 2 box-prompted segmentation
-    detection_pipeline.py   # YOLO inference + SAM refinement
-    filter_images.py         # Drop images with no relevant detections
-    depth_wrapper.py         # DepthAnything V2 wrapper
-    depth_pipeline.py        # Per-object depth stats
-    run_pipeline.py          # Entry point (steps 1→2→3)
-    decision_engine.py       # Rule-based STOP/SLOW/CONTINUE
-    vlm_pipeline.py          # GPT-4V + Claude Vision ensemble
-    build_submission.py      # Format final submission JSON
-    validate_submission.py   # Pre-submit validation
+ETHackers/
+  segment_module/
+    grounding_sam.py        # Phase 1: Grounding DINO + SAM2 segmentation  ← NEW
+    visualize.py            # Bounding box / mask visualisation (reused)
+  depth_module/
+    depth_module.py         # DepthAnything V2 wrapper (reused)
+    fused_depth.py          # Phase 2: Triple-fused depth per object        ← NEW
+    lift_3d.py              # Phase 3: 3D lift → point cloud → scene graph  ← NEW
+    run_depth.py            # CLI runner (reused)
+    heatmap.py              # Depth heatmap visualisation (reused)
+  filtering_module/
+    filter_images.py        # Drop images with no relevant detections (reused)
+  llm_module/
+    llm_backend.py          # Abstract LLM backend interface                ← NEW
+    decision_engine.py      # Phase 4: Rule engine + LLM ensemble (updated)
   data/
-    annotations/             # train.json, val.json, test.json
-    images/                  # train/, val/, test/ (download)
-    yolo_labels/             # generated by coco_to_yolo.py
+    challenge/data/         # annotations + images
   outputs/
-    detections/              # YOLO+SAM results (COCO JSON)
-    filtered/                # filtered/removed image ID lists
-    depth/                   # depth maps (.npy) + depth_stats.json
-  models/                    # model weights (downloaded at runtime)
-  submissions/
-    submission.json
-  Dockerfile
-  docker-compose.yml
+    detections/             # Grounding DINO + SAM results
+    filtered/               # filtered/removed image ID lists
+    scene_graphs/           # Per-image scene graph JSON + text
+    decisions.json          # Final STOP/SLOW/CONTINUE per image
+  run_pipeline.py           # End-to-end orchestrator                       ← NEW
   requirements.txt
+  Dockerfile
 ```
 
 ---
 
-## Phase 1: Label Ontology
+## Phase 1: Grounding DINO + SAM Segmentation
 
-**File:** `src/label_ontology.py`
+**File:** `segment_module/grounding_sam.py`
 
-- Define `RAW_CATEGORIES` (27 labels from train.json)
-- Define `ONTOLOGY` dict: raw label → `{group, risk_score}`
-- Normalize on lookup: `normalize(name)` lowercases + strips
-- Expose `get_risk_group(category_name: str) -> dict`
-- Include `GROUP_RISK` scores: HUMAN=5, VEHICLE=4, OBSTACLE=3, SAFETY_MARKER=2, BACKGROUND=1
+**Models:**
+- **GroundingDINO:** `IDEA-Research/grounding-dino-tiny` (~700MB, HuggingFace)
+- **SAM2:** `facebook/sam2-hiera-small` (~350MB)
 
----
+**How it works:**
+1. Prompt GroundingDINO with the 5 semantic group descriptions:
+   ```
+   "person . vehicle . forklift . obstacle . cone . safety marker"
+   ```
+2. GroundingDINO returns bounding boxes + matched text phrases
+3. Map matched phrases → risk group via keyword lookup
+4. Feed boxes to SAM2 (box-prompted mode) → pixel-level mask per object
+5. Apply NMS to remove overlapping detections (IoU threshold 0.5)
 
-## Phase 2: YOLOv8 Fine-tuning + SAM 2 Segmentation
+**Output per detection:**
+```python
+{
+    "risk_group":  str,          # HUMAN | VEHICLE | OBSTACLE | SAFETY_MARKER | BACKGROUND
+    "label":       str,          # matched text phrase from GroundingDINO
+    "bbox":        [x, y, w, h], # pixels, top-left origin
+    "mask":        np.ndarray,   # (H, W) bool array
+    "score":       float,        # GroundingDINO confidence
+}
+```
 
-### 2.1 COCO → YOLO Conversion
-**File:** `src/coco_to_yolo.py`
-
-- Read `train.json` and `val.json`
-- Map categories to 5-group class IDs (reduces class imbalance vs 27 raw classes)
-- Write per-image `.txt` YOLO label files to `data/yolo_labels/train/` and `val/`
-- Generate `data/dataset.yaml`
-
-### 2.2 YOLOv8 Training
-**File:** `src/yolo_train.py`
-
-- GPU (Northflank T4/A100): `yolov8s.pt`, 50 epochs, batch=16
-- CPU fallback: `yolov8n.pt`, 30 epochs, batch=8
-- Save best weights to `models/yolov8s_finetuned.pt`
-- Target: mAP@0.5 ≥ 0.40 on val
-
-### 2.3 SAM 2 Segmentation Wrapper
-**File:** `src/sam_wrapper.py`
-
-- Load `sam2-hiera-small` checkpoint
-- `generate_masks_from_bboxes(image, bboxes)` → list of binary masks
-- Box-prompted mode only (much faster than automatic mask generation)
-
-### 2.4 Detection Pipeline
-**File:** `src/detection_pipeline.py`
-
-- Load fine-tuned YOLOv8 + SAM 2
-- `run_detection(image_path) → list[Detection]`
-- Each Detection: `{image_id, category_id, raw_label, risk_group, risk_score, bbox, score, mask?}`
-- Confidence threshold: `score > CONF_THRESHOLD` (default 0.25, env var)
-- Save as COCO-format JSON in `outputs/detections/`
+**Key detail:** Use score threshold 0.15–0.20 (lower than YOLO's 0.25) — open-vocab models tend to be underconfident on industrial objects.
 
 ---
 
-## Phase 3: Image Filtering
+## Phase 2: Triple-Fused Depth
 
-**File:** `src/filter_images.py`
+**File:** `depth_module/fused_depth.py`
+
+Computes three independent depth estimates per object, then fuses them into one depth score.
+
+### Input 1 — DepthAnything V2
+- Run `DepthModule.infer_depth(image_bgr)` → raw depth map (H×W)
+- Extract median depth value inside the SAM **mask** (more accurate than bbox rectangle)
+- Min-max normalise across all objects in the image → `depth_da ∈ [0,1]`
+
+### Input 2 — Real-world size reference
+```python
+REFERENCE_HEIGHTS_M = {
+    "HUMAN":         1.70,   # average person
+    "VEHICLE":       2.50,   # forklift / truck
+    "OBSTACLE":      0.90,   # barrel / crate average
+    "SAFETY_MARKER": 0.75,   # cone / sign
+}
+# Focal length estimate (no calibration available):
+focal_px = max(img_W, img_H) * 0.8
+
+# Metric distance estimate:
+distance_m = (REFERENCE_HEIGHTS_M[group] * focal_px) / bbox_height_px
+
+# Normalise across all objects in image → depth_rw ∈ [0,1]
+```
+Falls back to `depth_da` if the group has no reference height.
+
+### Input 3 — Relative bbox area proxy
+```python
+area_ratio = (bbox_w * bbox_h) / (img_W * img_H)
+MAX_AREA_RATIO = 0.25   # object covering 25% of frame = very close
+depth_area = 1.0 - min(area_ratio / MAX_AREA_RATIO, 1.0)
+# Large bbox → small depth_area (close); small bbox → large depth_area (far)
+```
+
+### Fusion
+```python
+# Default weights (tunable via env vars DEPTH_W_DA / DEPTH_W_RW / DEPTH_W_AREA):
+depth_score = 0.6 * depth_da + 0.3 * depth_rw + 0.1 * depth_area
+```
+
+### Proximity + path zone assignment
+```python
+# Proximity:
+CLOSE  if depth_score <= 0.35
+MEDIUM if depth_score <= 0.65
+FAR    otherwise
+
+# Path zone (middle third of image = robot's forward path):
+CENTER     if img_W/3 <= bbox_cx <= 2*img_W/3
+PERIPHERAL otherwise
+```
+
+**Output per object adds:**
+```python
+{
+    "depth_score":     float,   # fused [0,1], 0=closest
+    "depth_da":        float,   # DepthAnything contribution
+    "depth_rw":        float,   # real-world size contribution
+    "depth_area":      float,   # bbox area contribution
+    "proximity_label": str,     # CLOSE | MEDIUM | FAR
+    "path_zone":       str,     # CENTER | PERIPHERAL
+}
+```
+
+---
+
+## Phase 3: 3D Lift → Scene Graph
+
+**File:** `depth_module/lift_3d.py`
+
+### Step 1 — 3D Lift (pinhole camera model)
+```python
+# Estimated intrinsics (no calibration available):
+fx = fy = max(W, H) * 0.8
+cx, cy  = W / 2, H / 2
+
+# Unproject each pixel (u, v) with depth value d:
+X = (u - cx) * d / fx   # horizontal
+Y = (v - cy) * d / fy   # vertical
+Z = d                    # forward (depth axis)
+```
+Sparse-sampled every 4th pixel for efficiency. Output: `(N, 3)` point cloud array.
+
+### Step 2 — Object clusters
+For each detected object, extract 3D points inside its SAM mask and compute:
+- `centroid_3d`: mean (X, Y, Z) of points in mask
+- `nearest_z`: minimum Z (closest point to camera)
+- `extent_3d`: 3D bounding box dimensions
+
+### Step 3 — Scene Graph (nodes + edges)
+**Nodes** — one per object:
+```python
+{
+    "id":              int,
+    "risk_group":      str,
+    "label":           str,
+    "score":           float,
+    "centroid_3d":     [x, y, z],   # metres (approximate)
+    "nearest_z":       float,
+    "depth_score":     float,
+    "proximity_label": str,
+    "path_zone":       str,
+}
+```
+
+**Edges** — for every pair (A, B):
+```python
+{
+    "from":              int,    # node id A
+    "to":                int,    # node id B
+    "distance_3d":       float,  # Euclidean between centroids
+    "relative_position": str,    # "A in front of B" | "A behind B" | "A left of B" | "A right of B"
+    "blocking":          bool,   # True if A.Z < B.Z and their bboxes overlap in 2D
+}
+```
+
+### Step 4 — Text serialisation (fed to LLM)
+```
+Scene (3 objects):
+  [1] HUMAN 'person'        — CLOSE,  CENTER path, depth=0.12, at (0.1, 0.0, 1.8m)
+  [2] VEHICLE 'forklift'    — MEDIUM, PERIPHERAL,  depth=0.41, at (1.2, 0.0, 3.5m)
+  [3] SAFETY_MARKER 'cone'  — FAR,    CENTER path,  depth=0.72, at (-0.1, 0.0, 5.2m)
+
+Spatial relationships:
+  [1] person is 1.9m in front of [2] forklift
+  [1] person is blocking the robot's view of [3] cone
+  [2] forklift is 1.7m to the right of [1] person
+```
+
+**Saved to:** `outputs/scene_graphs/{image_id}.json` (machine-readable) and passed as text to the LLM.
+
+---
+
+## Phase 4: LLM Decision Engine
+
+**Files:** `llm_module/llm_backend.py`, `llm_module/decision_engine.py`
+
+### Rule Engine (always runs — deterministic safety net)
+
+Priority-ordered rules applied before any LLM call:
+
+```
+STOP    — HUMAN at CLOSE proximity OR in CENTER path zone
+STOP    — VEHICLE at CLOSE AND in CENTER path zone
+SLOW    — Any HUMAN present (not triggering STOP)
+SLOW    — Any VEHICLE present (not triggering STOP)
+SLOW    — Any OBSTACLE in CENTER path zone
+SLOW    — Any SAFETY_MARKER present
+SLOW    — Any OBSTACLE off-path
+CONTINUE — Scene empty or only BACKGROUND
+```
+
+### LLM Backend (pluggable)
+
+Abstract interface so any model can be swapped in without changing the engine:
 
 ```python
-for each image:
-    detections = run_detection(image)
-    relevant = [d for d in detections if d.risk_group != "BACKGROUND"]
-    if len(relevant) == 0:
-        → removed_image_ids.json
-    else:
-        → filtered_image_ids.json
+class LLMBackend(ABC):
+    def query(self, scene_graph_text: str, image_path: str | None) -> dict | None:
+        """Returns {action, confidence, reasoning} or None on failure."""
 ```
 
-- Log: how many images removed per split
-- Output: `outputs/filtered/filtered_image_ids.json` + `removed_image_ids.json`
+Available backends (select via `--backend` flag or `LLM_BACKEND` env var):
+
+| Backend | Model | Input | Notes |
+|---------|-------|-------|-------|
+| `qwen_vl` | Qwen2.5-VL-7B-Instruct | Image + scene graph text | Multimodal, local GPU |
+| `llama` | LLaMA 3 8B Instruct | Scene graph text only | Text-only, local GPU |
+| `gpt` | GPT-4o | Scene graph text only | API, json_object mode |
+| `rules` | — | — | Rule engine only, no LLM |
+
+### Ensemble
+```
+Agreement  → average confidence, use LLM reasoning
+Disagreement → conservative action wins (STOP > SLOW > CONTINUE),
+               confidence reduced 10%, disagreement noted in reasoning
+LLM failure → rule engine result used silently (rules_fallback)
+```
+
+### LLM Prompt (scene graph → structured JSON)
+The LLM receives:
+1. System prompt with ontology + decision rules + confidence calibration guide
+2. The scene graph text (Phase 3 output)
+3. Optionally: the annotated image (multimodal backends)
+
+Output enforced as JSON: `{"action": "STOP"|"SLOW"|"CONTINUE", "confidence": float, "reasoning": str}`
 
 ---
 
-## Phase 4: Depth Analysis
+## End-to-End Runner
 
-**Files:** `src/depth_wrapper.py`, `src/depth_pipeline.py`
+**File:** `run_pipeline.py`
 
-### depth_wrapper.py
-- Load `Depth-Anything-V2-Small-hf` via HuggingFace transformers
-- `get_depth_map(image_path) → np.ndarray` (normalized 0=far, 1=near)
-- Batch processing for efficiency
+```bash
+python run_pipeline.py \
+    --split      test \
+    --data-dir   data/challenge/data \
+    --output-dir outputs/ \
+    --backend    qwen_vl \
+    --max-images 100        # omit for full run
+```
 
-### depth_pipeline.py
-- Iterate only over `filtered_image_ids.json`
-- Per detected object: extract depth stats from bbox region:
-  - `depth_mean`, `depth_min` (nearest point), `depth_std`
-- Output `outputs/depth/depth_stats.json`
-- Save `.npy` depth maps for visualization
-
-**Depth enriches the decision engine:** replaces bbox-size-only proximity with true depth estimates.
+Runs all 4 phases in sequence, writes `outputs/decisions.json`.
 
 ---
 
-## Phase 5: Decision Engine
+## Dependencies
 
-**File:** `src/decision_engine.py`
-
-**Input:** list of `{risk_group, bbox, score, depth_mean, depth_min}` + image dimensions
-
-**Decision rules (depth-aware, ordered by priority):**
-```python
-# STOP triggers
-if HUMAN present AND (depth_min > 0.7 OR is_central):  → STOP, conf 0.90
-if VEHICLE present AND depth_min > 0.7 AND is_central: → STOP, conf 0.88
-
-# SLOW triggers
-if HUMAN present (not close, not central):             → SLOW, conf 0.78
-if VEHICLE present (not in immediate path):            → SLOW, conf 0.72
-if OBSTACLE present AND is_central:                    → SLOW, conf 0.65
-if SAFETY_MARKER present:                              → SLOW, conf 0.60
-
-# CONTINUE
-if only BACKGROUND or nothing detected:                → CONTINUE, conf 0.85
 ```
+# Already in requirements.txt:
+transformers, huggingface_hub, ultralytics, pillow, opencv-python,
+numpy, scipy, tqdm, psutil, openai
 
-**Reasoning template:**
+# New additions:
+groundingdino-py          # Grounding DINO (or via HF transformers AutoModel)
+sam2                      # pip install git+https://github.com/facebookresearch/sam2
+qwen-vl-utils             # Qwen2.5-VL image pre-processing
 ```
-"{N} {group} detected at {close/medium/far} range {in/near/outside} robot path.
-[Optional: safety markers / partial obstruction.] Decision: {ACTION}."
-```
-
-**Validation:** run on val set using provided annotations. Target > 70% accuracy.
-
----
-
-## Phase 6: VLM Pipeline for Test Images
-
-**File:** `src/vlm_pipeline.py`
-
-- Query GPT-4V and Claude Vision in parallel on each test image
-- Ensemble: agree → use agreed action; disagree → conservative (STOP > SLOW > CONTINUE)
-- Cache responses to disk — never re-query
-- Run only on `filtered_image_ids.json` (saves ~30% cost)
-- Fallback: use YOLO detections + rule engine if VLM fails
-
----
-
-## Phase 7: Build & Validate Submission
-
-**Files:** `src/build_submission.py`, `src/validate_submission.py`
-
-- Merge VLM predictions + YOLO detections
-- Validate: every test image appears exactly once, actions uppercase, conf ∈ [0,1]
-- Output: `submissions/submission.json`
 
 ---
 
 ## Northflank Deployment
 
-**Single container** — see `Dockerfile`
-
+**Single container:**
 ```dockerfile
 FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
-COPY src/ ./src/
-COPY data/annotations/ ./data/annotations/
-ENV CONF_THRESHOLD=0.25
-ENV DEPTH_MODEL=small
-CMD ["python", "src/run_pipeline.py", "--split", "test"]
+COPY . .
+ENV LLM_BACKEND=qwen_vl
+ENV DEPTH_W_DA=0.6
+ENV DEPTH_W_RW=0.3
+ENV DEPTH_W_AREA=0.1
+CMD ["python", "run_pipeline.py", "--split", "test", "--data-dir", "data/challenge/data"]
 ```
 
-**Northflank setup:**
-- GPU Job: NVIDIA T4 or A100
-- Volume mount: `/app/data/images` and `/app/outputs`
-- Env vars: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `CONF_THRESHOLD`, `DEPTH_MODEL`
+**VRAM strategy (T4 = 16GB):**
+- Load models sequentially, offload each after use
+- GroundingDINO-tiny (~700MB) + SAM2-small (~350MB) + DepthAnything-small (~400MB) = ~1.5GB
+- LLM: Qwen2.5-VL-7B in 4-bit quant ≈ 4–5GB → total ≈ 6–7GB active at once
+- A100 variant: load all simultaneously
+
+**Env vars:**
+- `LLM_BACKEND` — qwen_vl | llama | gpt | rules
+- `OPENAI_API_KEY` — required for gpt backend
+- `DEPTH_W_DA`, `DEPTH_W_RW`, `DEPTH_W_AREA` — depth fusion weights
+- `CONF_THRESHOLD` — detection confidence threshold (default 0.15)
 
 ---
 
@@ -289,48 +414,32 @@ CMD ["python", "src/run_pipeline.py", "--split", "test"]
 
 | Person | Responsibility |
 |--------|---------------|
-| Person 1 | label_ontology.py + coco_to_yolo.py + yolo_train.py |
-| Person 2 | sam_wrapper.py + detection_pipeline.py + filter_images.py |
-| Person 3 | depth_wrapper.py + depth_pipeline.py + run_pipeline.py + Dockerfile |
+| Person 1 | `grounding_sam.py` (Phase 1) + `visualize.py` updates |
+| Person 2 | `fused_depth.py` + `lift_3d.py` (Phases 2 & 3) |
+| Person 3 | `llm_backend.py` + `decision_engine.py` + `run_pipeline.py` (Phase 4 + integration) |
 
-Converge on end-to-end test with 100 images before full run.
-
----
-
-## Time Budget
-
-| Hours | Task |
-|---|---|
-| 0–2 | Setup, data download, environment |
-| 2–3 | Label ontology + COCO→YOLO conversion |
-| 3–8 | YOLOv8 training (background) + SAM 2 wrapper |
-| 8–10 | Detection pipeline + filtering algorithm |
-| 10–12 | Depth analysis pipeline |
-| 12–16 | Decision engine (depth-aware rules) + VLM pipeline |
-| 16–18 | Integration + ensemble |
-| 18–20 | Submission build, validate, spot-check |
+Converge on end-to-end test with 20 images before full run.
 
 ---
 
 ## Verification Checkpoints
 
-1. **Ontology**: every category from train.json resolves without KeyError
-2. **COCO→YOLO**: `data/yolo_labels/train/` file count matches training images
-3. **YOLOv8**: mAP@0.5 on val ≥ 0.40
-4. **Filtering**: spot-check 10 removed images — confirm no relevant objects
-5. **Depth**: visualize 5 depth maps — near objects appear bright
-6. **Decision engine**: run on val set → accuracy > 70%
-7. **Submission**: run `validate_submission.py` → zero errors; count == test image count
+1. **Segmentation:** `grounding_sam.py` on 10 images → each returns masks with correct `risk_group` labels
+2. **Fused depth:** `fused_depth.py` on 10 images → print all 3 depth inputs + fused score; CLOSE objects have `depth_score < 0.35`
+3. **Scene graph:** `lift_3d.py` on 3 images → print scene graph text; spatial relations match visual inspection
+4. **Decision engine:** `--backend rules` on 20 images → reasonable STOP/SLOW/CONTINUE distribution; swap LLM backend and compare
+5. **End-to-end:** `run_pipeline.py --max-images 50 --backend rules` → `outputs/decisions.json` has one entry per image with valid `action`/`confidence`/`reasoning`
+6. **Submission:** Run `data/challenge/starter_kit/validate_submission.py` → zero errors
 
 ---
 
-## Risk Mitigation
+## Known Risks & Mitigations
 
-| Risk | Mitigation |
-|---|---|
-| VLM rate limits | Cache results; use both APIs in parallel |
-| YOLO training too slow | Use `yolov8n.pt` (nano), reduce to 30 epochs |
-| SAM 2 too slow | Use box-prompted mode (not auto); process only detected objects |
-| DepthAnything OOM | Use Small model; process in batches of 16 |
-| Data not on Northflank | Upload to volume via Northflank CLI or pull from Google Drive |
-| Submission format error | Run validator before final submission |
+| Risk | Severity | Mitigation |
+|------|----------|------------|
+| Grounding DINO misses industrial objects with semantic group prompts | Medium | Enrich prompts with synonyms: "person . worker . vehicle . forklift . machinery . barrel . cone" |
+| Camera intrinsics unknown → 3D lift approximate | Low | Spatial *relations* are directionally correct; metric precision not needed for STOP/SLOW/CONTINUE |
+| VRAM tight on T4 (16GB) with all models | High | Load sequentially + offload; use small/tiny variants; 4-bit LLM quant |
+| Real-world size depth meaningless for unknown object types | Low | Falls back to DepthAnything-only (`depth_rw = depth_da`) |
+| bbox area proxy unreliable for large distant objects | Low | Weight = 0.1 only; dominated by DepthAnything |
+| LLM hallucinating invalid JSON | Medium | Robust JSON extractor (`_extract_json`); rule engine always provides valid fallback |
