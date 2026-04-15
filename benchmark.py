@@ -1,16 +1,23 @@
 """
-Benchmark the pipeline on the validation set and print the score.
+Benchmark — full 7-step pipeline on the validation set.
 
-What this does:
-  1. Runs YOLO on all 3785 val images.
-  2. Applies rule-based decisions (aligned to the evaluator's heuristics).
-  3. Writes predictions.json in submission format (with detections for +20%).
-  4. Runs evaluate_local.py and prints the score.
+Steps per image (mirrors src/pipeline.py exactly):
+  1. GPT-4o-mini generates a Grounding DINO object prompt.
+  2. Grounding DINO detects objects (open-vocabulary).
+  3. SAM2 segments each detected object.
+  4. DepthAnything V2 produces a monocular depth map.
+     4a. LLM holistic depth signals.
+     4b. Edge-clipping rationalization.
+     4c. Triple-fused depth enrichment.
+  5. 3D lift + scene graph (SceneGraphBuilder).
+  6. GPT-4o-mini reads scene graph + SAFETY_RULES → STOP/SLOW/CONTINUE.
+  7. Write predictions.json (submission format) and run evaluate_local.py.
 
 Usage:
-  python benchmark.py                        # full val set
-  python benchmark.py --n 200               # quick sanity check (200 images)
-  python benchmark.py --out my_preds.json   # custom output path
+  python benchmark.py                    # full val set (3785 images)
+  python benchmark.py --n 50            # quick sanity check
+  python benchmark.py --out my.json     # custom output path
+  python benchmark.py --no-eval         # skip evaluate_local.py
 """
 
 import argparse
@@ -18,17 +25,44 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from collections import Counter
 
+import numpy as np
 from PIL import Image, ImageFile
-ImageFile.LOAD_TRUNCATED_IMAGES = True
 from tqdm import tqdm
+from transformers import pipeline as hf_pipeline
 
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+# ── paths ─────────────────────────────────────────────────────────────────────
 ROOT       = Path(__file__).parent
 STARTER    = ROOT / "data" / "challenge" / "starter_kit"
 VAL_ANN    = ROOT / "data" / "annotations" / "val.json"
 VAL_IMAGES = ROOT / "data" / "challenge" / "data" / "images" / "val"
+SAFETY_RULES_PATH = ROOT / "action_module" / "SAFETY_RULES.md"
 
-# submission category IDs (we define our own 4-class mapping)
+# Output dirs (saved alongside submission JSON for inspection)
+OUT_ROOT  = ROOT / "data" / "benchmark_output"
+OUT_GRAPH = OUT_ROOT / "scene_graphs"
+
+DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Small-hf"
+
+# ── sys.path: repo root + hyphenated 3d-module folder ─────────────────────────
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "3d-module"))
+
+# ── imports (after sys.path fixup) ────────────────────────────────────────────
+from segment_module.llm_objects    import load_client as load_llm_client, get_detection_prompt
+from segment_module.grounding_dino import load_model  as load_gdino,      detect
+from segment_module.sam2           import load_model  as load_sam2,       segment
+from depth_module.fused_depth      import enrich_detections
+from src.filter_module             import is_interesting
+from src.edge_rationalization      import rationalize_edge_detections
+from src.llm_depth                 import get_llm_depth_signals
+from llm_module.llm                import get_client  as get_llm_client,  analyse_with_scene_graph
+from lift_3d                       import SceneGraphBuilder
+
+# ── submission schema ─────────────────────────────────────────────────────────
 GROUP_TO_CAT: dict[str, int] = {
     "HUMAN":         1,
     "VEHICLE":       2,
@@ -43,97 +77,39 @@ DETECTION_CATEGORIES = [
     {"id": 4, "name": "SAFETY_MARKER"},
 ]
 
-# ── decision rules (mirror evaluate_local.py heuristics) ─────────────────────
 
-def make_decision(
-    detections: list[dict],
-    img_w: int,
-    img_h: int,
-) -> tuple[str, float, str]:
-    """
-    Rule-based decision using YOLO detections.
+# ── helpers ───────────────────────────────────────────────────────────────────
 
-    Rules (ordered by priority, matching the evaluator's approximate GT):
-      1. HUMAN + height ratio > 0.25          → STOP  0.90
-      2. VEHICLE + area > 15% of image         → STOP  0.85
-      3. Any HUMAN or VEHICLE present          → SLOW  0.70
-      4. SAFETY_MARKER present                 → SLOW  0.60
-      5. OBSTACLEs cover > 40% of image width  → SLOW  0.65
-      6. Nothing significant                   → CONTINUE 0.80
-    """
-    img_area = img_w * img_h
-    humans, vehicles, obstacles, markers = [], [], [], []
+def _norm_depth(raw: np.ndarray) -> np.ndarray:
+    """Invert DepthAnything disparity → normalised depth (0=close, 1=far)."""
+    d_min, d_max = raw.min(), raw.max()
+    return (1.0 - (raw - d_min) / (d_max - d_min + 1e-6)).astype(np.float32)
 
-    for det in detections:
-        g = det.get("risk_group", "")
-        if g == "HUMAN":          humans.append(det)
-        elif g == "VEHICLE":      vehicles.append(det)
-        elif g == "OBSTACLE":     obstacles.append(det)
-        elif g == "SAFETY_MARKER":markers.append(det)
 
-    # Rule 1 — close person
-    for det in humans:
-        x1, y1, x2, y2 = det["box"]
-        h_ratio = (y2 - y1) / img_h
-        if h_ratio > 0.25:
-            return (
-                "STOP", 0.90,
-                f"Person at close range (height ratio {h_ratio:.2f}). Immediate stop required."
-            )
-
-    # Rule 2 — large vehicle
-    for det in vehicles:
-        x1, y1, x2, y2 = det["box"]
-        area_ratio = (x2 - x1) * (y2 - y1) / img_area
-        if area_ratio > 0.15:
-            return (
-                "STOP", 0.85,
-                f"Vehicle occupying {area_ratio:.0%} of frame. Collision risk."
-            )
-
-    # Rule 3 — any person or vehicle
-    if humans or vehicles:
-        parts = []
-        if humans:   parts.append(f"{len(humans)} person(s)")
-        if vehicles: parts.append(f"{len(vehicles)} vehicle(s)")
-        return "SLOW", 0.70, f"Detected {' and '.join(parts)} in scene."
-
-    # Rule 4 — safety marker
-    if markers:
-        return "SLOW", 0.60, f"{len(markers)} safety marker(s) indicate a hazard zone."
-
-    # Rule 5 — obstacles blocking width
-    if obstacles:
-        ranges = sorted((det["box"][0], det["box"][2]) for det in obstacles)
-        merged: list[tuple[float, float]] = [ranges[0]]
-        for start, end in ranges[1:]:
-            if start <= merged[-1][1]:
-                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-            else:
-                merged.append((start, end))
-        total_w = sum(e - s for s, e in merged)
-        ratio = total_w / img_w
-        if ratio > 0.40:
-            return (
-                "SLOW", 0.65,
-                f"Obstacles span {ratio:.0%} of image width, partially blocking path."
-            )
-        return (
-            "CONTINUE", 0.75,
-            f"{len(obstacles)} obstacle(s) detected but not blocking path width."
+def _detection_summary(detections: list[dict]) -> str:
+    """Minimal fallback scene text when the scene graph builder fails."""
+    if not detections:
+        return "Scene: no objects detected."
+    lines = ["Scene (detection summary — no scene graph available):"]
+    for d in detections:
+        lines.append(
+            f"  - {d.get('label','?')} ({d.get('risk_group','?')}) "
+            f"proximity={d.get('proximity_label','?')} "
+            f"zone={d.get('path_zone','?')} "
+            f"depth={d.get('depth_score','?')}"
         )
-
-    return "CONTINUE", 0.80, "No significant hazards detected. Path appears clear."
+    return "\n".join(lines)
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
 
-def run(n: int | None, out_path: Path, team_name: str) -> None:
-    sys.path.insert(0, str(ROOT))
-    from segment_module.grounding_dino import load_model, detect_image
-    from src.label_ontology import map_detections
+def run(n: int | None, out_path: Path, team_name: str, run_eval: bool = True,
+        conf: float = 0.25) -> None:
 
-    # Load val annotations → filename → image_id map
+    for d in (OUT_GRAPH,):
+        d.mkdir(parents=True, exist_ok=True)
+
+    # ── Load val annotations ──────────────────────────────────────────────────
     with open(VAL_ANN) as f:
         val_coco = json.load(f)
     filename_to_id: dict[str, int] = {
@@ -141,27 +117,32 @@ def run(n: int | None, out_path: Path, team_name: str) -> None:
     }
     id_to_meta: dict[int, dict] = {img["id"]: img for img in val_coco["images"]}
 
-    # Collect val images
+    # ── Collect val images ────────────────────────────────────────────────────
     all_images = sorted(
         p for ext in ("*.jpg", "*.jpeg", "*.png")
         for p in VAL_IMAGES.glob(ext)
     )
     if n:
         all_images = all_images[:n]
+    print(f"Benchmarking on {len(all_images)} val images.\n")
 
-    print(f"Benchmarking on {len(all_images)} val images ...\n")
+    # ── Load all models once ──────────────────────────────────────────────────
+    print("Loading models ...")
+    llm_client    = load_llm_client()
+    gdino         = load_gdino()
+    sam2_model    = load_sam2()
+    depth_pipe    = hf_pipeline(task="depth-estimation", model=DEPTH_MODEL)
+    graph_builder = SceneGraphBuilder(point_cloud_step=4)
+    safety_rules  = SAFETY_RULES_PATH.read_text()
+    print("All models loaded.\n")
 
-    # Load YOLO (auto-uses fine-tuned weights if available)
-    print("Loading YOLO ...")
-    model = load_model()
-    print(f"  Model: {model.ckpt_path if hasattr(model, 'ckpt_path') else 'loaded'}\n")
+    predictions: list[dict] = []
+    det_records: list[dict] = []
+    missing: list[str]      = []
 
-    predictions  = []
-    detections   = []
-    missing      = []
-
-    for img_path in tqdm(all_images, desc="Predicting"):
+    for img_path in tqdm(all_images, desc="Benchmark"):
         fname    = img_path.name
+        stem     = img_path.stem
         image_id = filename_to_id.get(fname)
         if image_id is None:
             missing.append(fname)
@@ -174,40 +155,126 @@ def run(n: int | None, out_path: Path, team_name: str) -> None:
         try:
             image = Image.open(img_path).convert("RGB")
         except Exception as e:
-            tqdm.write(f"  [SKIP] {fname}: {e}")
+            tqdm.write(f"  [{stem}] cannot open ({e}) — skipping")
             continue
-        dets  = detect_image(model, image, score_threshold=0.25)
-        dets  = map_detections(dets)
 
-        action, confidence, reasoning = make_decision(dets, img_w, img_h)
+        W, H = image.size
+
+        # Step 1 — LLM object prompt
+        try:
+            prompt = get_detection_prompt(llm_client, image)
+        except Exception as e:
+            tqdm.write(f"  [{stem}] prompt failed ({e}) — using default")
+            prompt = "person . vehicle . forklift . barrel . cone . box . ladder ."
+
+        # Step 2 — Grounding DINO
+        try:
+            detections = detect(gdino, image, prompt, score_threshold=conf)
+        except Exception as e:
+            tqdm.write(f"  [{stem}] Grounding DINO failed ({e}) — no detections")
+            detections = []
+
+        if not detections:
+            predictions.append({
+                "image_id":   image_id,
+                "action":     "CONTINUE",
+                "confidence": 0.80,
+                "reasoning":  "No objects detected.",
+            })
+            continue
+
+        # Step 3 — SAM2
+        try:
+            segmented = segment(sam2_model, image, detections)
+        except Exception as e:
+            tqdm.write(f"  [{stem}] SAM2 failed ({e}) — masks zeroed")
+            segmented = [{**d, "mask": np.zeros((H, W), dtype=bool), "mask_score": 0.0}
+                         for d in detections]
+
+        # Step 4 — DepthAnything V2
+        try:
+            raw_depth  = np.array(depth_pipe(image)["depth"], dtype=np.float32)
+            norm_depth = _norm_depth(raw_depth)
+        except Exception as e:
+            tqdm.write(f"  [{stem}] depth failed ({e}) — uniform depth")
+            norm_depth = np.full((H, W), 0.5, dtype=np.float32)
+
+        # Step 4a — LLM holistic depth signals
+        try:
+            segmented = get_llm_depth_signals(image, segmented, llm_client)
+        except Exception as e:
+            tqdm.write(f"  [{stem}] llm_depth skipped ({e})")
+
+        # Step 4b — Edge rationalization
+        try:
+            segmented = rationalize_edge_detections(image, segmented, llm_client)
+        except Exception as e:
+            tqdm.write(f"  [{stem}] edge_rationalization skipped ({e})")
+
+        # Step 4c — Triple-fused depth enrichment
+        try:
+            enriched, corrected_depth = enrich_detections(segmented, norm_depth, H, W)
+        except Exception as e:
+            tqdm.write(f"  [{stem}] fused_depth failed ({e}) — raw depth")
+            enriched, corrected_depth = segmented, norm_depth
+
+        # Step 5 — Scene graph
+        masks = [d["mask"] for d in segmented]
+        try:
+            graph = graph_builder.process(
+                depth_map  = corrected_depth,
+                detections = enriched,
+                img_w      = W,
+                img_h      = H,
+                image_id   = stem,
+                masks      = masks,
+            )
+            graph_builder.save(graph, OUT_GRAPH)
+            scene_text = graph.text
+        except Exception as e:
+            tqdm.write(f"  [{stem}] scene graph failed ({e}) — using detection summary")
+            scene_text = _detection_summary(enriched)
+
+        # Step 6 — LLM action decision
+        result = analyse_with_scene_graph(
+            client           = llm_client,
+            original_path    = img_path,
+            scene_graph_text = scene_text,
+            safety_rules     = safety_rules,
+        )
 
         predictions.append({
-            "image_id":  image_id,
-            "action":    action,
-            "confidence": round(confidence, 4),
-            "reasoning": reasoning,
+            "image_id":   image_id,
+            "action":     result["action"],
+            "confidence": round(result["confidence"], 4),
+            "reasoning":  result["reasoning"],
         })
 
-        # Include detections in submission (worth 20% of score)
-        for det in dets:
+        tqdm.write(
+            f"  [{stem}] {result['action']} ({result['confidence']:.2f})"
+        )
+
+        # Detection records (20% of score)
+        for det in enriched:
             cat_id = GROUP_TO_CAT.get(det.get("risk_group", ""), None)
             if cat_id is None:
                 continue
             x1, y1, x2, y2 = det["box"]
-            detections.append({
-                "image_id":   image_id,
+            det_records.append({
+                "image_id":    image_id,
                 "category_id": cat_id,
-                "bbox":       [x1, y1, round(x2 - x1, 2), round(y2 - y1, 2)],
-                "score":      det["score"],
+                "bbox":        [x1, y1, round(x2 - x1, 2), round(y2 - y1, 2)],
+                "score":       det.get("score", 0.0),
             })
 
     if missing:
-        print(f"\n  Warning: {len(missing)} images not found in val annotations.")
+        print(f"\nWarning: {len(missing)} images not in val annotations — skipped.")
 
+    # ── Write submission JSON ─────────────────────────────────────────────────
     submission = {
         "team_name":            team_name,
         "predictions":          predictions,
-        "detections":           detections,
+        "detections":           det_records,
         "detection_categories": DETECTION_CATEGORIES,
     }
 
@@ -215,14 +282,16 @@ def run(n: int | None, out_path: Path, team_name: str) -> None:
     with open(out_path, "w") as f:
         json.dump(submission, f, indent=2)
 
-    # Distribution summary
-    from collections import Counter
     counts = Counter(p["action"] for p in predictions)
     print(f"\nPredictions written to {out_path}")
     print(f"  Total:    {len(predictions)}")
     for act in ("STOP", "SLOW", "CONTINUE"):
         c = counts.get(act, 0)
-        print(f"  {act:10s}: {c:5d}  ({c / len(predictions):.1%})")
+        n_total = len(predictions) or 1
+        print(f"  {act:10s}: {c:5d}  ({c / n_total:.1%})")
+
+    if not run_eval:
+        return
 
     # ── Run local evaluator ───────────────────────────────────────────────────
     print("\n" + "=" * 60)
@@ -243,13 +312,23 @@ def run(n: int | None, out_path: Path, team_name: str) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--n",    type=int, default=None,
+    parser = argparse.ArgumentParser(description="Full-pipeline benchmark on val set")
+    parser.add_argument("--n",       type=int,   default=None,
                         help="Limit to first N val images (default: all 3785)")
-    parser.add_argument("--out",  type=Path, default=ROOT / "predictions.json",
+    parser.add_argument("--out",     type=Path,  default=ROOT / "predictions.json",
                         help="Output path for submission JSON")
-    parser.add_argument("--team", type=str,  default="ETHackers",
-                        help="Team name for submission")
+    parser.add_argument("--team",    type=str,   default="ETHackers",
+                        help="Team name in submission")
+    parser.add_argument("--conf",    type=float, default=0.25,
+                        help="Detection confidence threshold")
+    parser.add_argument("--no-eval", action="store_true",
+                        help="Skip evaluate_local.py (just write predictions.json)")
     args = parser.parse_args()
 
-    run(n=args.n, out_path=args.out, team_name=args.team)
+    run(
+        n         = args.n,
+        out_path  = args.out,
+        team_name = args.team,
+        run_eval  = not args.no_eval,
+        conf      = args.conf,
+    )
