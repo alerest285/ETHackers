@@ -1,23 +1,24 @@
 """
 Benchmark — full 7-step pipeline on the validation set.
 
-Steps per image (mirrors src/pipeline.py exactly):
+Steps per image:
   1. GPT-4o-mini generates a Grounding DINO object prompt.
   2. Grounding DINO detects objects (open-vocabulary).
   3. SAM2 segments each detected object.
   4. DepthAnything V2 produces a monocular depth map.
-     4a. LLM holistic depth signals.
-     4b. Edge-clipping rationalization.
+     4a. LLM holistic depth signals.      [skipped with --fast]
+     4b. Edge-clipping rationalization.   [skipped with --fast]
      4c. Triple-fused depth enrichment.
   5. 3D lift + scene graph (SceneGraphBuilder).
   6. GPT-4o-mini reads scene graph + SAFETY_RULES → STOP/SLOW/CONTINUE.
   7. Write predictions.json (submission format) and run evaluate_local.py.
 
 Usage:
-  python benchmark.py                    # full val set (3785 images)
-  python benchmark.py --n 50            # quick sanity check
-  python benchmark.py --out my.json     # custom output path
-  python benchmark.py --no-eval         # skip evaluate_local.py
+  python benchmark.py                         # full val set (3785 images)
+  python benchmark.py --fast                  # B100-optimised: larger models, BF16, skip intermediate LLM steps
+  python benchmark.py --n 50                  # quick sanity check
+  python benchmark.py --out my.json           # custom output path
+  python benchmark.py --no-eval               # skip evaluate_local.py
 """
 
 import argparse
@@ -28,11 +29,17 @@ from pathlib import Path
 from collections import Counter
 
 import numpy as np
+import torch
 from PIL import Image, ImageFile
 from tqdm import tqdm
 from transformers import pipeline as hf_pipeline
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+# ── GPU setup ─────────────────────────────────────────────────────────────────
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = True
+    torch.set_float32_matmul_precision("high")
 
 # ── paths ─────────────────────────────────────────────────────────────────────
 ROOT       = Path(__file__).parent
@@ -45,7 +52,10 @@ SAFETY_RULES_PATH = ROOT / "action_module" / "SAFETY_RULES.md"
 OUT_ROOT  = ROOT / "data" / "benchmark_output"
 OUT_GRAPH = OUT_ROOT / "scene_graphs"
 
-DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Small-hf"
+DEPTH_MODEL_SMALL = "depth-anything/Depth-Anything-V2-Small-hf"
+DEPTH_MODEL_LARGE = "depth-anything/Depth-Anything-V2-Large-hf"
+SAM2_MODEL_BASE   = "facebook/sam2-hiera-base-plus"
+SAM2_MODEL_LARGE  = "facebook/sam2-hiera-large"
 
 # ── sys.path: repo root + hyphenated 3d-module folder ─────────────────────────
 sys.path.insert(0, str(ROOT))
@@ -104,10 +114,23 @@ def _detection_summary(detections: list[dict]) -> str:
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def run(n: int | None, out_path: Path, team_name: str, run_eval: bool = True,
-        conf: float = 0.25) -> None:
+        conf: float = 0.25, fast: bool = False) -> None:
 
     for d in (OUT_GRAPH,):
         d.mkdir(parents=True, exist_ok=True)
+
+    # ── GPU dtype ─────────────────────────────────────────────────────────────
+    use_bf16  = fast and torch.cuda.is_available()
+    th_dtype  = torch.bfloat16 if use_bf16 else torch.float32
+    depth_model_id = DEPTH_MODEL_LARGE if fast else DEPTH_MODEL_SMALL
+    sam2_model_id  = SAM2_MODEL_LARGE  if fast else SAM2_MODEL_BASE
+
+    if fast:
+        print("Fast (B100-optimised) mode:")
+        print(f"  depth model : {depth_model_id}")
+        print(f"  SAM2 model  : {sam2_model_id}")
+        print(f"  precision   : bfloat16" if use_bf16 else "  precision   : float32")
+        print("  skipping    : llm_depth + edge_rationalization\n")
 
     # ── Load val annotations ──────────────────────────────────────────────────
     with open(VAL_ANN) as f:
@@ -130,8 +153,23 @@ def run(n: int | None, out_path: Path, team_name: str, run_eval: bool = True,
     print("Loading models ...")
     llm_client    = load_llm_client()
     gdino         = load_gdino()
-    sam2_model    = load_sam2()
-    depth_pipe    = hf_pipeline(task="depth-estimation", model=DEPTH_MODEL)
+    sam2_model    = load_sam2(sam2_model_id)
+
+    depth_kwargs: dict = dict(task="depth-estimation", model=depth_model_id)
+    if use_bf16:
+        depth_kwargs["torch_dtype"] = th_dtype
+    if torch.cuda.is_available():
+        depth_kwargs["device"] = 0
+    depth_pipe    = hf_pipeline(**depth_kwargs)
+
+    # torch.compile on depth pipe's model for ~20-30% throughput gain on B100
+    if fast and torch.cuda.is_available():
+        try:
+            depth_pipe.model = torch.compile(depth_pipe.model, mode="reduce-overhead")
+            print("  torch.compile applied to depth model.")
+        except Exception as e:
+            print(f"  torch.compile skipped ({e})")
+
     graph_builder = SceneGraphBuilder(point_cloud_step=4)
     safety_rules  = SAFETY_RULES_PATH.read_text()
     print("All models loaded.\n")
@@ -199,17 +237,19 @@ def run(n: int | None, out_path: Path, team_name: str, run_eval: bool = True,
             tqdm.write(f"  [{stem}] depth failed ({e}) — uniform depth")
             norm_depth = np.full((H, W), 0.5, dtype=np.float32)
 
-        # Step 4a — LLM holistic depth signals
-        try:
-            segmented = get_llm_depth_signals(image, segmented, llm_client)
-        except Exception as e:
-            tqdm.write(f"  [{stem}] llm_depth skipped ({e})")
+        # Step 4a — LLM holistic depth signals  (skipped in --fast mode)
+        if not fast:
+            try:
+                segmented = get_llm_depth_signals(image, segmented, llm_client)
+            except Exception as e:
+                tqdm.write(f"  [{stem}] llm_depth skipped ({e})")
 
-        # Step 4b — Edge rationalization
-        try:
-            segmented = rationalize_edge_detections(image, segmented, llm_client)
-        except Exception as e:
-            tqdm.write(f"  [{stem}] edge_rationalization skipped ({e})")
+        # Step 4b — Edge rationalization  (skipped in --fast mode)
+        if not fast:
+            try:
+                segmented = rationalize_edge_detections(image, segmented, llm_client)
+            except Exception as e:
+                tqdm.write(f"  [{stem}] edge_rationalization skipped ({e})")
 
         # Step 4c — Triple-fused depth enrichment
         try:
@@ -323,6 +363,8 @@ if __name__ == "__main__":
                         help="Detection confidence threshold")
     parser.add_argument("--no-eval", action="store_true",
                         help="Skip evaluate_local.py (just write predictions.json)")
+    parser.add_argument("--fast",    action="store_true",
+                        help="B100-optimised: larger models, BF16, skip intermediate LLM steps")
     args = parser.parse_args()
 
     run(
@@ -331,4 +373,5 @@ if __name__ == "__main__":
         team_name = args.team,
         run_eval  = not args.no_eval,
         conf      = args.conf,
+        fast      = args.fast,
     )
