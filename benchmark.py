@@ -114,7 +114,19 @@ def _detection_summary(detections: list[dict]) -> str:
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def run(n: int | None, out_path: Path, team_name: str, run_eval: bool = True,
-        conf: float = 0.25, fast: bool = False) -> None:
+        conf: float = 0.25, fast: bool = False, learn: str = "off") -> None:
+    """
+    learn: How to handle UNKNOWN-fallback labels.
+      "off"  — keep as UNKNOWN (default; safe for unattended benchmarks).
+      "auto" — GPT-4o-mini classifies each new label and persists to
+               data/learned_aliases.json. One API call per novel label
+               (not per occurrence).
+      NOTE: interactive mode is deliberately NOT offered here; a 3.8k-image
+      benchmark would hang on stdin. Use pipeline.py --learn interactive to
+      teach the ontology, then re-run the benchmark with --learn off.
+    """
+    if learn not in ("off", "auto"):
+        raise ValueError(f"benchmark learn must be 'off' or 'auto'; got {learn!r}")
 
     for d in (OUT_GRAPH,):
         d.mkdir(parents=True, exist_ok=True)
@@ -206,8 +218,11 @@ def run(n: int | None, out_path: Path, team_name: str, run_eval: bool = True,
             prompt = "person . vehicle . forklift . barrel . cone . box . ladder ."
 
         # Step 2 — Grounding DINO
+        detect_kwargs = {"score_threshold": conf}
+        if learn == "auto":
+            detect_kwargs["learn_client"] = llm_client
         try:
-            detections = detect(gdino, image, prompt, score_threshold=conf)
+            detections = detect(gdino, image, prompt, **detect_kwargs)
         except Exception as e:
             tqdm.write(f"  [{stem}] Grounding DINO failed ({e}) — no detections")
             detections = []
@@ -365,6 +380,10 @@ if __name__ == "__main__":
                         help="Skip evaluate_local.py (just write predictions.json)")
     parser.add_argument("--fast",    action="store_true",
                         help="B100-optimised: larger models, BF16, skip intermediate LLM steps")
+    parser.add_argument("--learn",   choices=("off", "auto"), default="off",
+                        help="Handle UNKNOWN labels: off (keep as UNKNOWN) or "
+                             "auto (GPT-4o-mini classifies + persists). "
+                             "Use pipeline.py --learn interactive for human-in-the-loop.")
     args = parser.parse_args()
 
     run(
@@ -374,4 +393,5 @@ if __name__ == "__main__":
         run_eval  = not args.no_eval,
         conf      = args.conf,
         fast      = args.fast,
+        learn     = args.learn,
     )

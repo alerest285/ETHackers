@@ -117,7 +117,24 @@ def _serialise(detections: list[dict]) -> list[dict]:
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-def run(n: int = 5, seed: int | None = None, conf: float = 0.25) -> None:
+def run(
+    n: int = 5,
+    seed: int | None = None,
+    conf: float = 0.25,
+    learn: str = "off",
+) -> None:
+    """
+    Args:
+        learn: How to handle labels that fall back to UNKNOWN (risk=3).
+               "off"         — leave them as UNKNOWN (fail-safe, no API cost, no prompts).
+               "auto"        — GPT-4o-mini classifies each new label and persists it.
+               "interactive" — prompt the user on stdin for each new label.
+               Learned mappings go to data/learned_aliases.json and are auto-loaded
+               on the next run, so each novel label costs at most one prompt/API call
+               across the lifetime of the project.
+    """
+    if learn not in ("off", "auto", "interactive"):
+        raise ValueError(f"learn must be 'off', 'auto', or 'interactive'; got {learn!r}")
     random.seed(seed if seed is not None else random.randint(0, 2 ** 32))
 
     for d in (OUT_DET, OUT_OVERLAY, OUT_DEPTH, OUT_GRAPH, OUT_CLOUD, OUT_LLM, OUT_DISC):
@@ -167,8 +184,19 @@ def run(n: int = 5, seed: int | None = None, conf: float = 0.25) -> None:
             prompt = "person . vehicle . forklift . barrel . cone . box . ladder ."
 
         # Step 2 — Grounding DINO
+        # Any detection label that isn't in the ontology falls back to UNKNOWN
+        # (risk=3). The `learn` mode decides how to promote it to a real group:
+        #   - off         : stays UNKNOWN
+        #   - auto        : GPT-4o-mini classifies + persists
+        #   - interactive : user prompted on stdin
+        detect_kwargs = {"score_threshold": conf}
+        if learn == "auto":
+            detect_kwargs["learn_client"] = llm_client
+        elif learn == "interactive":
+            detect_kwargs["interactive"] = True
+
         try:
-            detections = detect(gdino, image, prompt, score_threshold=conf)
+            detections = detect(gdino, image, prompt, **detect_kwargs)
         except Exception as e:
             tqdm.write(f"  [{stem}] Grounding DINO failed ({e}) — skipping")
             disc_count += 1
@@ -300,6 +328,13 @@ if __name__ == "__main__":
     parser.add_argument("--n",    type=int,   default=5,    help="Images to sample")
     parser.add_argument("--seed", type=int,   default=None, help="Random seed")
     parser.add_argument("--conf", type=float, default=0.25, help="Detection confidence threshold")
+    parser.add_argument(
+        "--learn",
+        choices=("off", "auto", "interactive"),
+        default="off",
+        help="Handle UNKNOWN labels: off (keep as UNKNOWN), "
+             "auto (GPT-4o-mini classifies), interactive (prompt user on stdin)",
+    )
     args = parser.parse_args()
 
-    run(n=args.n, seed=args.seed, conf=args.conf)
+    run(n=args.n, seed=args.seed, conf=args.conf, learn=args.learn)
