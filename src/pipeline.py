@@ -36,14 +36,17 @@ from transformers import pipeline as hf_pipeline
 # ── local imports ─────────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from segment_module.grounding_dino import load_model as load_yolo, detect_image
-from src.label_ontology      import map_detections
-from src.filter_module       import filter_images
-from src.depth_overlay       import make_overlay
-from llm_module.llm          import get_client as get_llm_client, process_one as llm_process
+from segment_module.segment      import load_model as load_yolo, detect_image
+from src.label_ontology          import map_detections
+from src.filter_module           import filter_images
+from src.depth_overlay           import make_overlay
+from src.edge_rationalization    import rationalize_edge_detections
+from src.llm_depth               import get_llm_depth_signals
+from depth_module.fused_depth    import enrich_detections as fused_enrich
+from llm_module.llm              import get_client as get_llm_client, process_one as llm_process
 
 # ── paths ─────────────────────────────────────────────────────────────────────
-TRAIN_DIR   = Path("data/challenge/data/images/train")
+TRAIN_DIR   = Path("data/images/train")
 OUT_ROOT    = Path("data/pipeline_output")
 OUT_DET     = OUT_ROOT / "detections"
 OUT_OVERLAY = OUT_ROOT / "overlays"
@@ -61,39 +64,36 @@ def get_depth_map(depth_pipe, image: Image.Image) -> np.ndarray:
     return np.array(result["depth"], dtype=np.float32)
 
 
-def enrich_with_depth(detections: list[dict], depth_map: np.ndarray) -> list[dict]:
+def enrich_with_depth(
+    detections: list[dict],
+    depth_map:  np.ndarray,
+) -> tuple[list[dict], np.ndarray]:
     """
-    Add depth_score and proximity_label to each detection.
-    Reuses the logic from depth_module.DepthModule.process() without
-    requiring a local checkpoint.
+    Phase 2: Triple-Fused Depth.
+
+    Delegates to depth_module.fused_depth.enrich_detections, which fuses
+    three independent depth signals per detection:
+      - depth_da   : DepthAnything V2 median in bbox          (weight 0.6)
+      - depth_rw   : Real-world size + focal estimate         (weight 0.3)
+      - depth_area : Relative bbox area proxy                 (weight 0.1)
+
+    Weights are tunable via DEPTH_W_DA / DEPTH_W_RW / DEPTH_W_AREA env vars.
+
+    Returns
+    -------
+    enriched       : detections with depth_da/depth_rw/depth_area/depth_score/
+                     proximity_label/path_zone added
+    corrected_norm : (H, W) float32, 0=close 1=far, with bbox regions shifted
+                     toward their fused scores (used for the overlay heatmap)
     """
-    from src.depth_overlay import _proximity
+    H, W  = depth_map.shape
+    d_min = depth_map.min()
+    d_max = depth_map.max()
+    # DepthAnything outputs disparity: higher value = closer.
+    # Invert so norm: 0 = closest, 1 = farthest (matches proximity thresholds).
+    norm = 1.0 - (depth_map - d_min) / (d_max - d_min + 1e-6)
 
-    H, W    = depth_map.shape
-    d_min   = depth_map.min()
-    d_max   = depth_map.max()
-    # DepthAnything outputs disparity: higher value = closer object.
-    # Invert so that norm=0 → far, norm=1 → close, matching proximity thresholds.
-    norm    = 1.0 - (depth_map - d_min) / (d_max - d_min + 1e-6)
-
-    enriched = []
-    for det in detections:
-        d    = dict(det)
-        x1, y1, x2, y2 = [int(v) for v in d["box"]]
-        x1, y1 = max(x1, 0), max(y1, 0)
-        x2, y2 = min(x2, W), min(y2, H)
-
-        if x2 > x1 and y2 > y1:
-            roi          = norm[y1:y2, x1:x2]
-            depth_score  = float(np.median(roi))
-        else:
-            depth_score  = float(np.median(norm))
-
-        d["depth_score"]      = round(depth_score, 4)
-        d["proximity_label"]  = _proximity(depth_score)
-        enriched.append(d)
-
-    return enriched
+    return fused_enrich(detections, norm, H, W)
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -146,7 +146,12 @@ def run(n: int = 5, seed: int = 42, conf: float = 0.25) -> None:
             json.dump({"image": name, "detections": image_detections[name]}, f, indent=2)
 
     # ── 4. Depth estimation ───────────────────────────────────────────────────
-    print("\nLoading DepthAnything V2 ...")
+    # Initialise the LLM client early — needed for edge rationalization (step 4a)
+    # and scene analysis (step 6).
+    print("\nConnecting to LLM API ...")
+    llm_client = get_llm_client()
+
+    print("Loading DepthAnything V2 ...")
     depth_pipe = hf_pipeline(task="depth-estimation", model=DEPTH_MODEL)
 
     OUT_DET.mkdir(parents=True, exist_ok=True)
@@ -160,22 +165,33 @@ def run(n: int = 5, seed: int = 42, conf: float = 0.25) -> None:
         # Get depth map
         depth_map = get_depth_map(depth_pipe, image)
 
+        # ── 4a. LLM holistic depth rationalization ────────────────────────────
+        # Ask the LLM to estimate proximity for every detection using full
+        # scene context (perspective, occlusion, shadows, object sizes, etc.).
+        # Result stored as depth_llm per detection → 4th fusion signal.
+        dets = get_llm_depth_signals(image, dets, llm_client)
+
+        # ── 4b. Edge-clip rationalization ─────────────────────────────────────
+        # For bbox edges touching the image boundary, ask the LLM whether the
+        # object is cut off (very close) vs genuinely small/far.
+        # Overrides the naive bbox-area depth signal for those cases.
+        dets = rationalize_edge_detections(image, dets, llm_client)
+
         # ── 5. Enrich detections + build overlay ─────────────────────────────
-        dets_enriched = enrich_with_depth(dets, depth_map)
+        # enrich_with_depth also returns the bbox-corrected depth map so the
+        # heatmap panel in the overlay reflects the heuristic adjustments.
+        dets_enriched, corrected_depth = enrich_with_depth(dets, depth_map)
 
         # Save enriched detections JSON
         with open(OUT_DET / f"{Path(name).stem}.json", "w") as f:
             json.dump({"image": name, "detections": dets_enriched}, f, indent=2)
 
-        # Save overlay image
-        overlay_bgr = make_overlay(image, dets_enriched, depth_map)
+        # Save overlay image (right panel shows corrected depth heatmap)
+        overlay_bgr = make_overlay(image, dets_enriched, corrected_depth)
         cv2.imwrite(str(OUT_OVERLAY / f"{Path(name).stem}_overlay.png"), overlay_bgr)
 
     # ── 6. LLM scene analysis ─────────────────────────────────────────────────
-    print("\nConnecting to Qwen API ...")
-    llm_client = get_llm_client()
-
-    print("Running LLM scene analysis ...")
+    print("\nRunning LLM scene analysis ...")
     for name in tqdm(kept, desc="LLM"):
         stem         = Path(name).stem
         overlay_path = OUT_OVERLAY / f"{stem}_overlay.png"
