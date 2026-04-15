@@ -1,3 +1,6 @@
+# ── Dataset (tracked by DVC) ─────────────────────────────────────────────────
+data/
+
 # ── Model checkpoints (large binary files) ───────────────────────────────────
 depth_module/checkpoints/
 *.pth
@@ -6,16 +9,17 @@ depth_module/checkpoints/
 *.bin
 *.safetensors
 
-# ── Cloned sub-repo (install manually: git clone ...) ────────────────────────
+# ── Cloned sub-repos (install manually) ──────────────────────────────────────
 depth_module/Depth-Anything-V2/
 
 # ── Generated outputs ────────────────────────────────────────────────────────
 outputs/
 *_depth_*.png
 depth_module/mock_image.png
-
-# ── Dataset (too large for git) ───────────────────────────────────────────────
-data/
+*.npy
+*.npz
+predictions.json
+submissions/
 
 # ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
@@ -44,3 +48,7 @@ env/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# ── IDEs ─────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
