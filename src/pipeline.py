@@ -36,7 +36,7 @@ from transformers import pipeline as hf_pipeline
 # ── local imports ─────────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from segment_module.segment  import load_model as load_yolo, detect_image
+from segment_module.grounding_dino import load_model as load_yolo, detect_image
 from src.label_ontology      import map_detections
 from src.filter_module       import filter_images
 from src.depth_overlay       import make_overlay
