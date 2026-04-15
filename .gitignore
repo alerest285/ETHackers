@@ -1,4 +1,4 @@
-# ── Dataset (tracked by DVC) ─────────────────────────────────────────────────
+# ── Dataset (too large for git) ──────────────────────────────────────────────
 data/
 
 # ── Model checkpoints (large binary files) ───────────────────────────────────
