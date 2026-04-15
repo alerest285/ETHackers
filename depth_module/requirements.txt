@@ -1,0 +1,9 @@
+# Depth Anything V2 dependencies
+# Install the repo's own requirements.txt first:
+#   pip install -r depth_module/Depth-Anything-V2/requirements.txt
+# Then this file adds anything extra needed by our wrapper.
+
+torch>=2.0.0
+torchvision>=0.15.0
+opencv-python>=4.8.0
+numpy>=1.24.0
