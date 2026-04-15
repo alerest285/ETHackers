@@ -1,102 +1,67 @@
 """
-Visualize SAM2 segmentation results.
+Visualize YOLOS detection results.
 
-Loads a .json + .npy masks produced by segment.py and draws
-colored mask overlays + bounding boxes on the original image.
+Draws bounding boxes + labels on the original image.
 
 Usage:
-    python visualize.py --image ../data/images/test/download.jpeg
-    python visualize.py --split test          # visualize all images in a split
+    python visualize.py --image ../data/images/test/foo.jpg
+    python visualize.py --split test
 """
 
 import json
-import random
 from pathlib import Path
 
-import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
+
+# One color per risk group
+GROUP_COLORS: dict[str, tuple] = {
+    "person":  (255,  50,  50),   # red
+    "vehicle": (255, 160,   0),   # orange
+    "bicycle": (255, 220,   0),   # yellow
+    "animal":  (100, 200, 100),   # green
+    "cone":    (  0, 180, 255),   # blue
+    "box":     (180, 100, 255),   # purple
+    "other":   (180, 180, 180),   # grey
+}
 
 
-# One distinct color per detection (RGBA, semi-transparent)
-PALETTE = [
-    (255,  64,  64, 120),   # red
-    ( 64, 160, 255, 120),   # blue
-    ( 64, 220,  64, 120),   # green
-    (255, 200,   0, 120),   # yellow
-    (200,  64, 255, 120),   # purple
-    (  0, 220, 200, 120),   # teal
-    (255, 140,   0, 120),   # orange
-    (220, 220, 220, 120),   # grey
-]
-
-
-def color_for(idx: int) -> tuple:
-    return PALETTE[idx % len(PALETTE)]
-
-
-def overlay_masks(
-    image_path: Path,
-    json_path:  Path,
-    seg_dir:    Path,
+def draw_detections(
+    image_path:  Path,
+    json_path:   Path,
     output_path: Path,
 ) -> Path:
-    """
-    Draw masks + boxes on the original image and save as PNG.
+    """Draw boxes + labels on the original image and save as PNG."""
+    image = Image.open(image_path).convert("RGB")
+    draw  = ImageDraw.Draw(image)
 
-    Args:
-        image_path:  Original image.
-        json_path:   Detection JSON produced by segment.py.
-        seg_dir:     Root of the segmentation output (where mask .npy files live).
-        output_path: Where to save the visualized image.
-
-    Returns the output path.
-    """
-    image = Image.open(image_path).convert("RGBA")
-    W, H  = image.size
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(json_path) as f:
         data = json.load(f)
 
     detections = data.get("detections", [])
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     if not detections:
-        print(f"No detections for {image_path.name}, saving original.")
-        image.convert("RGB").save(output_path)
+        image.save(output_path)
+        print(f"No detections — saved original: {output_path}")
         return output_path
 
-    # Composite layer for transparent mask fills
-    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    draw    = ImageDraw.Draw(overlay)
-
-    for idx, det in enumerate(detections):
-        color = color_for(idx)
-
-        # --- Mask fill ---
-        mask_file = seg_dir / det["mask_file"]
-        if mask_file.exists():
-            mask_np   = np.load(mask_file).astype(bool)
-            mask_rgba = np.zeros((H, W, 4), dtype=np.uint8)
-            mask_rgba[mask_np] = color
-            mask_img  = Image.fromarray(mask_rgba, mode="RGBA")
-            overlay   = Image.alpha_composite(overlay, mask_img)
-            draw      = ImageDraw.Draw(overlay)
-
-        # --- Bounding box ---
+    for det in detections:
         x1, y1, x2, y2 = det["box"]
-        box_color = color[:3] + (255,)   # fully opaque outline
-        draw.rectangle([x1, y1, x2, y2], outline=box_color, width=2)
+        group  = det.get("risk_group", "other")
+        color  = GROUP_COLORS.get(group, GROUP_COLORS["other"])
+        label  = det["label"]
+        score  = det["score"]
 
-        # --- Label ---
-        label = det["label"]
-        score = det["iou_score"]
-        text  = f"{label} {score:.2f}"
-        draw.rectangle([x1, y1 - 14, x1 + len(text) * 7, y1], fill=box_color)
-        draw.text((x1 + 2, y1 - 13), text, fill=(0, 0, 0, 255))
+        # Box
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
 
-    # Merge overlay onto original
-    result = Image.alpha_composite(image, overlay).convert("RGB")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    result.save(output_path)
+        # Label background + text
+        text     = f"{label} {score:.2f}"
+        text_w   = len(text) * 7
+        draw.rectangle([x1, y1 - 15, x1 + text_w, y1], fill=color)
+        draw.text((x1 + 2, y1 - 14), text, fill=(0, 0, 0))
+
+    image.save(output_path)
     print(f"Saved: {output_path}")
     return output_path
 
@@ -107,17 +72,16 @@ def visualize_image(
     split:      str = "test",
     output_dir: str | Path | None = None,
 ) -> Path:
-    """Visualize a single image by path."""
     image_path = Path(image_path)
     data_dir   = Path(data_dir)
-    seg_dir    = data_dir / "segmentation" / split
-    json_path  = seg_dir / f"{image_path.stem}.json"
+    det_dir    = data_dir / "detections" / split
+    json_path  = det_dir / f"{image_path.stem}.json"
 
     if output_dir is None:
         output_dir = data_dir / "visualizations" / split
     output_path = Path(output_dir) / f"{image_path.stem}_viz.png"
 
-    return overlay_masks(image_path, json_path, seg_dir, output_path)
+    return draw_detections(image_path, json_path, output_path)
 
 
 def visualize_split(
@@ -126,30 +90,28 @@ def visualize_split(
     output_dir: str | Path | None = None,
     max_images: int | None = None,
 ) -> None:
-    """Visualize all segmented images in a split."""
-    data_dir  = Path(data_dir)
-    seg_dir   = data_dir / "segmentation" / split
+    data_dir   = Path(data_dir)
+    det_dir    = data_dir / "detections" / split
     images_dir = data_dir / "images" / split
 
     if output_dir is None:
         output_dir = data_dir / "visualizations" / split
 
-    json_files = sorted(seg_dir.glob("*.json"))
+    json_files = sorted(det_dir.glob("*.json"))
     if max_images:
         json_files = json_files[:max_images]
 
     for json_path in json_files:
-        # Find original image (try jpg, jpeg, png)
         for ext in [".jpg", ".jpeg", ".png"]:
             image_path = images_dir / (json_path.stem + ext)
             if image_path.exists():
                 break
         else:
-            print(f"Original image not found for {json_path.stem}, skipping.")
+            print(f"Image not found for {json_path.stem}, skipping.")
             continue
 
         output_path = Path(output_dir) / f"{json_path.stem}_viz.png"
-        overlay_masks(image_path, json_path, seg_dir, output_path)
+        draw_detections(image_path, json_path, output_path)
 
     print(f"Done. Visualizations saved to {output_dir}")
 
@@ -157,25 +119,15 @@ def visualize_split(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Visualize SAM2 segmentation results")
-    parser.add_argument("--image",      default=None,    help="Path to a single image")
-    parser.add_argument("--split",      default="test",  choices=["train", "val", "test"])
+    parser = argparse.ArgumentParser(description="Visualize YOLOS detections")
+    parser.add_argument("--image",      default=None)
+    parser.add_argument("--split",      default="test", choices=["train", "val", "test"])
     parser.add_argument("--data-dir",   default="../data")
     parser.add_argument("--output-dir", default=None)
-    parser.add_argument("--max-images", default=None,    type=int)
+    parser.add_argument("--max-images", default=None, type=int)
     args = parser.parse_args()
 
     if args.image:
-        visualize_image(
-            image_path = args.image,
-            data_dir   = args.data_dir,
-            split      = args.split,
-            output_dir = args.output_dir,
-        )
+        visualize_image(args.image, args.data_dir, args.split, args.output_dir)
     else:
-        visualize_split(
-            data_dir   = args.data_dir,
-            split      = args.split,
-            output_dir = args.output_dir,
-            max_images = args.max_images,
-        )
+        visualize_split(args.data_dir, args.split, args.output_dir, args.max_images)

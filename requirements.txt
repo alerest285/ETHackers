@@ -1,0 +1,22 @@
+# ── Core ML ───────────────────────────────────────────────────────────────────
+# PyTorch: install manually for your platform from https://pytorch.org
+# Mac (MPS):  pip install torch torchvision
+# Linux/CUDA: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+numpy
+scipy
+
+# ── HuggingFace (depth model) ─────────────────────────────────────────────────
+git+https://github.com/huggingface/transformers
+huggingface_hub
+
+# ── Detection ─────────────────────────────────────────────────────────────────
+ultralytics
+
+# ── Vision / image processing ─────────────────────────────────────────────────
+pillow
+opencv-python
+pycocotools
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+tqdm
+psutil
