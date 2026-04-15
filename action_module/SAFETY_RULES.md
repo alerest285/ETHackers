@@ -23,7 +23,11 @@ These run **before** any LLM call and always provide a valid fallback.
 | PERIPHERAL  | anything outside center third          |
 
 **Risk groups** (highest → lowest):  
-`HUMAN (5) > VEHICLE (4) > OBSTACLE (3) > SAFETY_MARKER (2) > BACKGROUND (1)`
+`HUMAN (5) > VEHICLE (4) > OBSTACLE (3) > SAFETY_MARKER (2) > BACKGROUND (1) > SURFACE (0)`
+
+**SURFACE** objects (floor, road, parking lot, floor markings, ground) are what the robot
+navigates ON. Their `proximity_label` is always `NAVIGABLE` — this is not a hazard signal.
+SURFACE detections must **never** trigger STOP or SLOW under any condition.
 
 ---
 
@@ -97,6 +101,22 @@ When the LLM is available, its decision is compared to the rule engine output:
 
 ---
 
+---
+
+### SURFACE (risk=0) — Navigable Ground
+
+SURFACE objects are never hazards. The robot drives on them.
+
+| Rule | Condition | Action |
+|------|-----------|--------|
+| SRF1 | Any SURFACE detection, any zone | Ignore — no change to action |
+| SRF2 | Only SURFACE + BACKGROUND in frame | CONTINUE (same as C2) |
+
+- Floor markings, painted lines, and parking outlines are SURFACE — never treat as OBSTACLE even in CENTER zone.
+- `proximity_label = NAVIGABLE` means the detection is a surface, not a threat.
+
+---
+
 ## Edge Cases
 
 | Scenario | Rule | Rationale |
@@ -108,3 +128,6 @@ When the LLM is available, its decision is compared to the rule engine output:
 | Overlapping HUMAN + VEHICLE bboxes | Apply most severe rule (STOP if either triggers it) | Co-location is inherently high risk |
 | Empty scene after filtering | CONTINUE (C1, 0.82) | Nothing to react to |
 | All objects at depth_score > 0.80 | CONTINUE — reduce confidence to 0.65 | Scene may be poorly estimated |
+| SURFACE detected at any proximity | CONTINUE (SRF1) | Robot is on it — expected |
+| Floor marking in CENTER zone | CONTINUE (SRF1) | Painted lines are navigable |
+| proximity_label = NAVIGABLE | Skip depth rules entirely | Not a positional hazard |

@@ -26,53 +26,20 @@ Each detection:
     }
 """
 
+import sys
+from pathlib import Path
+
 import torch
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 
+# ── repo root on path (needed when segment_module is imported directly) ────────
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from src.label_ontology import get_risk_group as _get_risk_group  # single source of truth
+
 # ── model ─────────────────────────────────────────────────────────────────────
 
 MODEL_ID = "IDEA-Research/grounding-dino-base"
-
-# ── label → risk group ────────────────────────────────────────────────────────
-# Maps common Grounding DINO output phrases to the 5 risk groups.
-# The LLM prompt may introduce novel phrases — unknown labels fall back to BACKGROUND.
-
-_KEYWORDS: dict[str, str] = {
-    # HUMAN
-    "person": "HUMAN", "worker": "HUMAN", "pedestrian": "HUMAN",
-    "human": "HUMAN", "head": "HUMAN", "helmet": "HUMAN",
-    "hard hat": "HUMAN", "hat": "HUMAN", "operator": "HUMAN",
-    # VEHICLE
-    "forklift": "VEHICLE", "pallet jack": "VEHICLE", "car": "VEHICLE",
-    "truck": "VEHICLE", "bus": "VEHICLE", "motorcycle": "VEHICLE",
-    "bicycle": "VEHICLE", "train": "VEHICLE", "vehicle": "VEHICLE",
-    "cart": "VEHICLE", "tow truck": "VEHICLE",
-    # OBSTACLE
-    "barrel": "OBSTACLE", "drum": "OBSTACLE", "crate": "OBSTACLE",
-    "box": "OBSTACLE", "cardboard box": "OBSTACLE", "container": "OBSTACLE",
-    "suitcase": "OBSTACLE", "handcart": "OBSTACLE", "ladder": "OBSTACLE",
-    "chair": "OBSTACLE", "pallet": "OBSTACLE", "shelf": "OBSTACLE",
-    "rack": "OBSTACLE", "pipe": "OBSTACLE",
-    # SAFETY_MARKER
-    "cone": "SAFETY_MARKER", "safety cone": "SAFETY_MARKER",
-    "traffic cone": "SAFETY_MARKER", "traffic sign": "SAFETY_MARKER",
-    "stop sign": "SAFETY_MARKER", "traffic light": "SAFETY_MARKER",
-    "warning sign": "SAFETY_MARKER", "wet floor sign": "SAFETY_MARKER",
-    "barrier": "SAFETY_MARKER", "caution tape": "SAFETY_MARKER",
-}
-
-
-def _label_to_group(label: str) -> str:
-    label_l = label.strip().lower()
-    # exact match first
-    if label_l in _KEYWORDS:
-        return _KEYWORDS[label_l]
-    # keyword scan for partial matches (e.g. "yellow safety cone" → SAFETY_MARKER)
-    for kw, group in _KEYWORDS.items():
-        if kw in label_l:
-            return group
-    return "BACKGROUND"
 
 
 # ── model handle ──────────────────────────────────────────────────────────────
@@ -147,7 +114,7 @@ def detect(
         x1, y1, x2, y2 = [round(float(v), 2) for v in box]
         score_f  = round(float(score), 4)
         label_s  = label.strip().lower()
-        group    = _label_to_group(label_s)
+        group    = _get_risk_group(label_s)["group"]
         rel_area = round((x2 - x1) * (y2 - y1) / (W * H), 6)
 
         detections.append({

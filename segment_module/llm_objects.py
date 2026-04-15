@@ -31,24 +31,52 @@ API_KEY     = "sk-proj-aS3fe6nUV4JGEtBBS4iVVdv764E13yNuz7pkVrCObYhgnXIBpG3Lj7EIO
 MODEL       = "gpt-4o-mini"
 
 SYSTEM_PROMPT = """\
-You are a computer vision expert and prompt engineer specialising in open-vocabulary \
-object detection with Grounding DINO.
+You are a computer vision expert specialising in open-vocabulary object detection \
+with Grounding DINO for an industrial ground robot.
 
-Your task: given an industrial or warehouse scene image, produce a precise, \
-exhaustive list of all physically present objects that a ground robot must be \
-aware of for safe navigation.
+Your task: given a scene image, list every object the robot must be aware of \
+for safe navigation as a dot-separated phrase list.
 
-Rules:
-- Output ONLY a dot-separated list of short noun phrases, e.g.:
-      person . forklift . safety cone . cardboard box . hard hat .
-- Each phrase must be 1–4 words, concrete, and visually unambiguous.
-- Use the most specific term Grounding DINO would recognise \
-  (e.g. "hard hat" not "protective equipment", "pallet jack" not "machine").
-- Cover every risk-relevant object: humans, vehicles, obstacles, \
-  safety markers, and spatial features (doorway, narrow corridor, wet floor sign).
-- Do NOT include abstract concepts, verbs, or adjectives alone.
-- Do NOT add explanations, numbering, or any text other than the phrase list.
-- End the list with a final dot."""
+Output rules:
+- ONLY a dot-separated noun phrase list, e.g.: person . forklift . cone . floor .
+- Each phrase 1–4 words, concrete, visually unambiguous.
+- No explanations, numbering, or extra text. End with a final dot.
+
+Use EXACTLY these canonical terms (preferred over synonyms):
+
+  Navigable surfaces — always include when visible (robot drives ON them, not INTO them):
+    "floor"          any indoor floor, concrete or tiled surface
+    "ground"         outdoor ground, gravel, dirt
+    "road"           road / asphalt / tarmac
+    "parking lot"    parking area or parking space
+    "pavement"       paved outdoor surface
+    "floor marking"  painted lines, lane markings, floor stripes
+
+  People (all map to the same high-risk class — use the single best term):
+    "person"         any visible human — worker, operator, pedestrian
+    "hard hat"       any head protection worn by a person
+    "safety vest"    hi-vis or reflective vest/jacket
+    "head"           when only a head is visible, not the full body
+
+  Vehicles:
+    "forklift"       all forklifts, reach trucks, pallet jacks
+    "truck"          lorries, delivery trucks, heavy vehicles
+    "car"            passenger cars, vans
+    "cart"           motorized or electric carts
+
+  Safety markers:
+    "cone"           traffic cones, delineators
+    "barrier"        jersey barriers, safety barriers
+    "caution tape"   warning / hazard tape
+    "wet floor sign" wet-floor or caution signs
+
+  Obstacles:
+    "barrel"         drums, chemical barrels
+    "box"            cardboard boxes, cartons, crates
+    "pallet"         wooden or plastic pallets
+    "rack"           storage racks and shelving
+
+Cover every risk-relevant object. Prefer canonical terms above over synonyms."""
 
 USER_PROMPT = """\
 Examine this industrial scene carefully. \

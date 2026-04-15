@@ -148,11 +148,12 @@ def masks_to_overlay(
     Useful for visual inspection. Returns a PIL RGBA image.
     """
     COLORS = {
-        "HUMAN":         (220, 50,  50),
-        "VEHICLE":       (50,  50,  220),
-        "OBSTACLE":      (220, 140, 50),
-        "SAFETY_MARKER": (50,  200, 50),
-        "BACKGROUND":    (160, 160, 160),
+        "HUMAN":         (220, 50,  50),   # red
+        "VEHICLE":       (50,  50,  220),  # blue
+        "OBSTACLE":      (220, 140, 50),   # orange
+        "SAFETY_MARKER": (50,  200, 50),   # green
+        "SURFACE":       (100, 180, 255),  # light blue — navigable ground
+        "BACKGROUND":    (160, 160, 160),  # grey
     }
 
     overlay = image.convert("RGBA").copy()

@@ -327,6 +327,22 @@ def enrich_detections(
         x1 = max(0, x1);  y1 = max(0, y1)
         x2 = min(image_w, x2);  y2 = min(image_h, y2)
 
+        # ── SURFACE early-exit ────────────────────────────────────────────────
+        # Navigable surfaces (floor, road, parking lot, …) are what the robot
+        # drives ON.  Computing a proximity_label for them is meaningless and
+        # would produce spurious CLOSE labels that confuse the rule engine.
+        # We mark them with the sentinel "NAVIGABLE" and skip all depth fusion.
+        if d.get("risk_group") == "SURFACE":
+            bbox_cx = (x1 + x2) / 2.0
+            d["depth_da"]        = None
+            d["depth_rw"]        = None
+            d["depth_area"]      = None
+            d["depth_score"]     = None
+            d["proximity_label"] = "NAVIGABLE"
+            d["path_zone"]       = path_zone(bbox_cx, image_w)
+            enriched.append(d)
+            continue
+
         # ── Signal 1: DepthAnything V2 ────────────────────────────────────────
         da = depth_from_depthmap(norm_depth, x1, y1, x2, y2)
 
