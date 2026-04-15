@@ -21,7 +21,7 @@ from ultralytics import YOLO
 # Config
 # ---------------------------------------------------------------------------
 
-MODEL_ID = "yolo11n.pt"   # auto-downloaded on first run; swap for yolo11s/m/l/x for more accuracy
+MODEL_ID = "yolo26n.pt"   # auto-downloaded on first run; swap for yolo26s/m/l/x for more accuracy
 
 # ---------------------------------------------------------------------------
 # COCO label → risk group
