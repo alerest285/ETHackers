@@ -23,7 +23,14 @@ These run **before** any LLM call and always provide a valid fallback.
 | PERIPHERAL  | anything outside center third          |
 
 **Risk groups** (highest → lowest):  
-`HUMAN (5) > VEHICLE (4) > OBSTACLE (3) > SAFETY_MARKER (2) > BACKGROUND (1) > SURFACE (0)`
+`HUMAN (5) > VEHICLE (4) > OBSTACLE (3) = UNKNOWN (3) > SAFETY_MARKER (2) > BACKGROUND (1) > SURFACE (0)`
+
+**UNKNOWN** is the fail-safe fallback for labels the ontology has never seen
+(e.g., the LLM prompt generator invents a novel phrase). It carries **risk=3**,
+identical to OBSTACLE, so it triggers SLOW under any OBSTACLE rule. It never
+silently degrades to BACKGROUND. A background job (`classify_and_learn`) then
+classifies the label into one of the 6 real groups and persists the mapping to
+`data/learned_aliases.json` so subsequent runs resolve it instantly.
 
 **SURFACE** objects (floor, road, parking lot, floor markings, ground) are what the robot
 navigates ON. Their `proximity_label` is always `NAVIGABLE` — this is not a hazard signal.
@@ -131,3 +138,5 @@ SURFACE objects are never hazards. The robot drives on them.
 | SURFACE detected at any proximity | CONTINUE (SRF1) | Robot is on it — expected |
 | Floor marking in CENTER zone | CONTINUE (SRF1) | Painted lines are navigable |
 | proximity_label = NAVIGABLE | Skip depth rules entirely | Not a positional hazard |
+| risk_group = UNKNOWN | Apply OBSTACLE-tier rules (W5, W9, etc.) | Fail-safe: unseen label treated as physical obstruction |
+| UNKNOWN + CENTER + CLOSE | SLOW (confidence 0.60) | Matches W5 semantics; conservative until classified |

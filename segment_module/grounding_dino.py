@@ -75,6 +75,7 @@ def detect(
     image:           Image.Image,
     text_prompt:     str,
     score_threshold: float = 0.30,
+    learn_client=None,
 ) -> list[dict]:
     """
     Run Grounding DINO on a single image with the given text prompt.
@@ -84,6 +85,10 @@ def detect(
         image:           PIL image.
         text_prompt:     Dot-separated phrases, e.g. "person . forklift . cone ."
         score_threshold: Minimum detection confidence.
+        learn_client:    Optional OpenAI client. When provided, any detection
+                         whose label falls back to UNKNOWN is classified into
+                         one of the 6 real groups and the mapping is persisted
+                         to data/learned_aliases.json for future runs.
 
     Returns:
         List of detection dicts sorted by descending score.
@@ -114,16 +119,27 @@ def detect(
         x1, y1, x2, y2 = [round(float(v), 2) for v in box]
         score_f  = round(float(score), 4)
         label_s  = label.strip().lower()
-        group    = _get_risk_group(label_s)["group"]
+        resolved = _get_risk_group(label_s)
         rel_area = round((x2 - x1) * (y2 - y1) / (W * H), 6)
 
-        detections.append({
+        det = {
             "label":         label_s,
-            "risk_group":    group,
+            "risk_group":    resolved["group"],
+            "risk_score":    resolved["risk_score"],
             "box":           [x1, y1, x2, y2],
             "score":         score_f,
             "relative_area": rel_area,
-        })
+        }
+        if resolved.get("unmapped"):
+            det["unmapped"] = True
+        detections.append(det)
 
     detections.sort(key=lambda d: d["score"], reverse=True)
+
+    # Optional auto-learning: classify UNKNOWN labels via GPT-4o-mini and
+    # persist them to data/learned_aliases.json so subsequent runs skip this.
+    if learn_client is not None and any(d.get("unmapped") for d in detections):
+        from segment_module.llm_objects import classify_and_learn
+        classify_and_learn(learn_client, detections)
+
     return detections

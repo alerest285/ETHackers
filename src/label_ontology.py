@@ -6,6 +6,7 @@ Risk levels (0–5):
   1  BACKGROUND     irrelevant background (sky, wall, generic objects)
   2  SAFETY_MARKER  hazard indicators (cone, sign, barrier, caution tape)
   3  OBSTACLE       static physical obstruction (box, barrel, crate, pallet)
+  3  UNKNOWN        label not (yet) in any alias bucket — conservative medium risk
   4  VEHICLE        motorized or large mobile objects (forklift, car, truck)
   5  HUMAN          any person or their presence indicator
 
@@ -13,13 +14,22 @@ Risk levels (0–5):
   indicate human proximity and must not form a separate lower-risk class.
 
 Matching strategy (get_risk_group):
-  1. Exact match on normalized label
+  1. Exact match on normalized label (includes persisted learned aliases)
   2. Word-boundary substring scan — longest alias wins (guards "car"≠"cardboard")
-  3. Fallback -> BACKGROUND (risk=1)
+  3. Fallback -> UNKNOWN (risk=3, flagged `unmapped=True`) — fail-safe
+
+Auto-learning:
+  Labels that hit the UNKNOWN fallback can be classified into one of the 6
+  real groups via `segment_module.llm_objects.classify_and_learn`, which calls
+  `register_learned_alias(label, group)`. The mapping is persisted to
+  `data/learned_aliases.json` and auto-loaded on next import, so the ontology
+  grows as the LLM produces new phrasings.
 """
 
 from __future__ import annotations
+import json
 import re
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Canonical risk scores per group
@@ -30,9 +40,16 @@ GROUP_RISK: dict[str, int] = {
     "BACKGROUND":    1,
     "SAFETY_MARKER": 2,
     "OBSTACLE":      3,
+    "UNKNOWN":       3,   # fail-safe fallback for unseen labels — same risk as OBSTACLE
     "VEHICLE":       4,
     "HUMAN":         5,
 }
+
+# Groups the LLM classifier is allowed to pick when learning a new alias.
+# UNKNOWN is excluded — it must resolve to a concrete class.
+_CLASSIFIABLE_GROUPS: frozenset[str] = frozenset({
+    "SURFACE", "BACKGROUND", "SAFETY_MARKER", "OBSTACLE", "VEHICLE", "HUMAN",
+})
 
 # ---------------------------------------------------------------------------
 # Alias groups
@@ -148,6 +165,11 @@ ALIAS_GROUPS: dict[str, list[list[str]]] = {
          "high vis vest", "orange vest", "hi vis vest"],
         ["safety jacket", "hi-vis jacket", "reflective jacket", "high-vis jacket"],
     ],
+
+    # ── UNKNOWN (risk 3) — starts empty; auto-populated at runtime ────────────
+    # New labels are inserted here via register_learned_alias() before being
+    # moved to one of the 6 real groups by the LLM classifier.
+    "UNKNOWN": [],
 }
 
 # ---------------------------------------------------------------------------
@@ -162,17 +184,83 @@ _CANONICAL: dict[str, str] = {}
 
 for _group, _buckets in ALIAS_GROUPS.items():
     for _bucket in _buckets:
+        if not _bucket:
+            continue
         _canon = _bucket[0].lower().strip()
         for _alias in _bucket:
             _key = _alias.lower().strip()
             _EXACT[_key] = _group
             _CANONICAL[_key] = _canon
 
+# ---------------------------------------------------------------------------
+# Learned-alias persistence
+# Learned entries are stored in data/learned_aliases.json so the ontology
+# grows across runs as the LLM classifier resolves new labels.
+# ---------------------------------------------------------------------------
+
+_LEARNED_PATH: Path = Path(__file__).resolve().parent.parent / "data" / "learned_aliases.json"
+
+
+def _load_learned() -> dict[str, str]:
+    if not _LEARNED_PATH.exists():
+        return {}
+    try:
+        data = json.loads(_LEARNED_PATH.read_text(encoding="utf-8"))
+        # Filter out anything the current schema no longer recognizes.
+        return {k: v for k, v in data.items()
+                if isinstance(k, str) and v in _CLASSIFIABLE_GROUPS}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+_LEARNED: dict[str, str] = _load_learned()
+
+# Merge learned aliases into the in-memory lookup (exact match only — we do
+# NOT add them to the substring index because arbitrary LLM phrasings may be
+# overly generic and cause spurious matches).
+for _lbl, _grp in _LEARNED.items():
+    _key = _lbl.lower().strip()
+    _EXACT[_key] = _grp
+    _CANONICAL.setdefault(_key, _key)
+
 # Sorted by descending phrase length so longer (more specific) matches win.
 # Example: "pallet jack" (11 chars) is tried before "pallet" (6 chars).
+# Only the curated ALIAS_GROUPS entries participate — learned aliases are
+# exact-match-only (see note above).
 _SUBSTR_SORTED: list[tuple[str, str]] = sorted(
-    _EXACT.items(), key=lambda kv: len(kv[0]), reverse=True
+    ((k, v) for k, v in _EXACT.items() if k not in _LEARNED),
+    key=lambda kv: len(kv[0]),
+    reverse=True,
 )
+
+
+def register_learned_alias(label: str, group: str) -> None:
+    """Record a classified label so future detections resolve instantly.
+
+    - Updates the in-memory exact-match table.
+    - Appends to the UNKNOWN-bucket-turned-learned bookkeeping list.
+    - Persists to data/learned_aliases.json (crash-safe: written every call).
+
+    Raises ValueError if `group` is not one of the 6 canonical groups.
+    """
+    if group not in _CLASSIFIABLE_GROUPS:
+        raise ValueError(
+            f"Cannot register alias into {group!r}; "
+            f"must be one of {sorted(_CLASSIFIABLE_GROUPS)}"
+        )
+    key = label.lower().strip()
+    if not key:
+        return
+
+    _EXACT[key] = group
+    _CANONICAL.setdefault(key, key)
+    _LEARNED[key] = group
+
+    _LEARNED_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _LEARNED_PATH.write_text(
+        json.dumps(_LEARNED, indent=2, sort_keys=True, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def _word_boundary_match(phrase: str, text: str) -> bool:
@@ -200,37 +288,35 @@ def get_risk_group(category_name: str) -> dict:
     Resolve any raw detection label to its risk group and score.
 
     Resolution order:
-      1. Exact match (normalized)
+      1. Exact match (normalized) — includes persisted learned aliases
       2. Word-boundary substring scan — longest alias tested first
-      3. Fallback -> BACKGROUND (risk=1)
+      3. Fallback -> UNKNOWN (risk=3, `unmapped=True`) — fail-safe, not BACKGROUND
 
     Returns:
-        {"group": str, "risk_score": int}
+        {"group": str, "risk_score": int, "unmapped": bool}
+        `unmapped` is True only when step 3 fires — consumers can then pass
+        the label to `classify_and_learn` to promote it into a real group.
 
     Examples:
-        get_risk_group("person")       -> {"group": "HUMAN",         "risk_score": 5}
-        get_risk_group("hard hat")     -> {"group": "HUMAN",         "risk_score": 5}
-        get_risk_group("helmet")       -> {"group": "HUMAN",         "risk_score": 5}
-        get_risk_group("parking lot")  -> {"group": "SURFACE",       "risk_score": 0}
-        get_risk_group("floor")        -> {"group": "SURFACE",       "risk_score": 0}
-        get_risk_group("cardboard box")-> {"group": "OBSTACLE",      "risk_score": 3}
-        get_risk_group("pallet jack")  -> {"group": "VEHICLE",       "risk_score": 4}
-        get_risk_group("unknown")      -> {"group": "BACKGROUND",    "risk_score": 1}
+        get_risk_group("person")        -> {"group": "HUMAN",    "risk_score": 5, "unmapped": False}
+        get_risk_group("parking lot")   -> {"group": "SURFACE",  "risk_score": 0, "unmapped": False}
+        get_risk_group("cardboard box") -> {"group": "OBSTACLE", "risk_score": 3, "unmapped": False}
+        get_risk_group("some new thing")-> {"group": "UNKNOWN",  "risk_score": 3, "unmapped": True}
     """
     norm = normalize(category_name)
 
     # Step 1 — exact
     if norm in _EXACT:
         group = _EXACT[norm]
-        return {"group": group, "risk_score": GROUP_RISK[group]}
+        return {"group": group, "risk_score": GROUP_RISK[group], "unmapped": False}
 
     # Step 2 — word-boundary substring (longest alias wins)
     for phrase, group in _SUBSTR_SORTED:
         if _word_boundary_match(phrase, norm):
-            return {"group": group, "risk_score": GROUP_RISK[group]}
+            return {"group": group, "risk_score": GROUP_RISK[group], "unmapped": False}
 
-    # Step 3 — fallback
-    return {"group": "BACKGROUND", "risk_score": GROUP_RISK["BACKGROUND"]}
+    # Step 3 — fallback: UNKNOWN (medium risk, flagged for learning)
+    return {"group": "UNKNOWN", "risk_score": GROUP_RISK["UNKNOWN"], "unmapped": True}
 
 
 def get_canonical(category_name: str) -> str:
@@ -257,8 +343,10 @@ def map_detections(detections: list[dict]) -> list[dict]:
     for det in detections:
         d = dict(det)
         result = get_risk_group(d.get("label", ""))
-        d["risk_group"]  = result["group"]
-        d["risk_score"]  = result["risk_score"]
+        d["risk_group"] = result["group"]
+        d["risk_score"] = result["risk_score"]
+        if result.get("unmapped"):
+            d["unmapped"] = True
         enriched.append(d)
     return enriched
 
@@ -288,7 +376,7 @@ if __name__ == "__main__":
         ("parking lot", "SURFACE", 0),
         ("floor marking", "SURFACE", 0),
         ("ground", "SURFACE", 0),
-        ("unknown_label", "BACKGROUND", 1),
+        ("unknown_label", "UNKNOWN", 3),   # fail-safe fallback, flagged for learning
     ]
     all_pass = True
     for label, exp_group, exp_risk in tests:
@@ -303,5 +391,18 @@ if __name__ == "__main__":
     print(f"\n=== get_canonical ===\n")
     for raw in ["hard-hat", "motorcycle helmet", "hi-vis vest", "cardboard box"]:
         print(f"  {raw!r:<25s} -> {get_canonical(raw)!r}")
+
+    print(f"\n=== Unmapped flag ===\n")
+    r = get_risk_group("robot arm")
+    print(f"  'robot arm' -> group={r['group']} risk={r['risk_score']} unmapped={r['unmapped']}")
+    assert r["unmapped"] is True and r["group"] == "UNKNOWN"
+
+    print(f"\n=== register_learned_alias (in-memory only, skipping disk write) ===\n")
+    # Simulate classifier output without touching the JSON file.
+    _EXACT["robot arm test"] = "OBSTACLE"
+    r = get_risk_group("robot arm test")
+    print(f"  'robot arm test' -> group={r['group']} risk={r['risk_score']} unmapped={r['unmapped']}")
+    assert r["group"] == "OBSTACLE" and r["unmapped"] is False
+    del _EXACT["robot arm test"]
 
     print(f"\n{'All tests passed.' if all_pass else 'FAILURES detected — check above.'}")

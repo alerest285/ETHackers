@@ -83,6 +83,84 @@ Examine this industrial scene carefully. \
 List every object relevant to robot navigation safety as a Grounding DINO prompt."""
 
 
+# ── classifier: maps a novel label to one of the 6 canonical groups ───────────
+
+CLASSIFY_SYSTEM = """\
+You classify detection labels for an industrial ground robot into risk groups.
+
+Pick EXACTLY one group name from this list:
+  SURFACE        navigable ground — floor, road, parking lot, sidewalk, pavement
+  BACKGROUND     irrelevant structures — walls, ceiling, sky, windows, columns
+  SAFETY_MARKER  hazard indicators — cones, signs, barriers, caution tape, bollards
+  OBSTACLE       static physical obstructions — boxes, pallets, machines, pipes, furniture
+  VEHICLE        motorized or large mobile objects — cars, forklifts, trucks, carts, AGVs
+  HUMAN          any person, body part, or protective gear worn by a person
+
+Rules:
+- Output ONLY the group name in uppercase. No punctuation, no explanation.
+- When genuinely uncertain, choose OBSTACLE — that keeps the robot safe.
+- Protective equipment (helmet, vest, hard hat) -> HUMAN (indicates a person).
+- Painted lines / floor markings -> SURFACE (robot drives on them)."""
+
+
+def classify_label(client: OpenAI, label: str) -> str:
+    """Ask GPT-4o-mini to classify a single label into one of the 6 groups.
+
+    Returns the group name. Falls back to "OBSTACLE" (conservative) on any
+    malformed response or API failure.
+    """
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": CLASSIFY_SYSTEM},
+                {"role": "user",   "content": f"Label: {label!r}"},
+            ],
+            max_tokens=8,
+            temperature=0,
+        )
+        raw = response.choices[0].message.content.strip().upper()
+    except Exception:
+        raw = ""
+
+    valid = {"SURFACE", "BACKGROUND", "SAFETY_MARKER", "OBSTACLE", "VEHICLE", "HUMAN"}
+    return raw if raw in valid else "OBSTACLE"
+
+
+def classify_and_learn(client: OpenAI, detections: list[dict]) -> list[dict]:
+    """Classify every detection flagged `unmapped`, persist to the ontology,
+    and rewrite its risk_group / risk_score in-place.
+
+    Batched per unique label so each new phrase costs at most one LLM call.
+    Safe to call on an already-resolved list (no-op if no unmapped entries).
+    """
+    # Imported here to avoid a circular import at module load time.
+    from src.label_ontology import register_learned_alias, get_risk_group
+
+    unique_unmapped: dict[str, str] = {}   # label -> chosen group
+    for det in detections:
+        if not det.get("unmapped"):
+            continue
+        lbl = (det.get("label") or "").strip().lower()
+        if lbl and lbl not in unique_unmapped:
+            unique_unmapped[lbl] = classify_label(client, lbl)
+
+    for lbl, grp in unique_unmapped.items():
+        register_learned_alias(lbl, grp)
+
+    # Re-resolve every detection; unmapped flag clears for learned labels.
+    for det in detections:
+        r = get_risk_group(det.get("label", ""))
+        det["risk_group"] = r["group"]
+        det["risk_score"] = r["risk_score"]
+        if r.get("unmapped"):
+            det["unmapped"] = True
+        else:
+            det.pop("unmapped", None)
+
+    return detections
+
+
 # ── client ────────────────────────────────────────────────────────────────────
 
 def load_client() -> OpenAI:
