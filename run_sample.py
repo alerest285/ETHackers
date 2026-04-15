@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 import cv2
+import numpy as np
 from PIL import Image
 from tqdm import tqdm
 from transformers import pipeline as hf_pipeline
