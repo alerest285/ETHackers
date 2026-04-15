@@ -1,3 +1,8 @@
+# ── Web server ────────────────────────────────────────────────────────────────
+fastapi
+uvicorn[standard]
+python-multipart
+
 # ── Core ML ───────────────────────────────────────────────────────────────────
 # PyTorch: install manually for your platform from https://pytorch.org
 # Mac (MPS):  pip install torch torchvision
