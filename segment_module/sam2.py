@@ -149,11 +149,14 @@ def masks_to_overlay(
     """
     COLORS = {
         "HUMAN":         (220, 50,  50),   # red
+        "ANIMAL":        (200, 80,  180),  # magenta — living but non-human
         "VEHICLE":       (50,  50,  220),  # blue
-        "OBSTACLE":      (220, 140, 50),   # orange
         "SAFETY_MARKER": (50,  200, 50),   # green
-        "SURFACE":       (100, 180, 255),  # light blue — navigable ground
+        "OBSTACLE":      (220, 140, 50),   # orange
+        "FOOD":          (240, 220, 80),   # yellow — food / edible debris
         "BACKGROUND":    (160, 160, 160),  # grey
+        "SURFACE":       (100, 180, 255),  # light blue — navigable ground
+        "UNKNOWN":       (255, 0,   255),  # magenta-pink — stands out for review
     }
 
     overlay = image.convert("RGBA").copy()

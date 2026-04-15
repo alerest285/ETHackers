@@ -70,11 +70,24 @@ Use EXACTLY these canonical terms (preferred over synonyms):
     "caution tape"   warning / hazard tape
     "wet floor sign" wet-floor or caution signs
 
-  Obstacles:
+  Obstacles (incl. liquid hazards on the floor):
     "barrel"         drums, chemical barrels
     "box"            cardboard boxes, cartons, crates
     "pallet"         wooden or plastic pallets
     "rack"           storage racks and shelving
+    "puddle"         water puddle, wet patch
+    "spill"          liquid/oil/chemical spill
+    "wet floor"      unsigned wet area (SIGN -> "wet floor sign")
+    "leak"           fluid leak from a machine
+    "trash"          general floor debris, litter
+
+  Animals (use the species name — all classed as ANIMAL risk tier):
+    "dog", "cat", "bird", "cow", "horse", "rat"
+
+  Food / food debris (FOOD risk tier):
+    "food"           generic edible item
+    "apple", "banana", "sandwich", "bread"
+    "food wrapper"   snack wrappers, candy wrappers
 
 Cover every risk-relevant object. Prefer canonical terms above over synonyms."""
 
@@ -88,19 +101,26 @@ List every object relevant to robot navigation safety as a Grounding DINO prompt
 CLASSIFY_SYSTEM = """\
 You classify detection labels for an industrial ground robot into risk groups.
 
-Pick EXACTLY one group name from this list:
-  SURFACE        navigable ground — floor, road, parking lot, sidewalk, pavement
-  BACKGROUND     irrelevant structures — walls, ceiling, sky, windows, columns
-  SAFETY_MARKER  hazard indicators — cones, signs, barriers, caution tape, bollards
-  OBSTACLE       static physical obstructions — boxes, pallets, machines, pipes, furniture
-  VEHICLE        motorized or large mobile objects — cars, forklifts, trucks, carts, AGVs
-  HUMAN          any person, body part, or protective gear worn by a person
+Pick EXACTLY one group name from this list (risk rises with the number):
+  SURFACE        (0) navigable ground — floor, road, parking lot, pavement
+  BACKGROUND     (1) irrelevant structure — walls, ceiling, sky, windows
+  OBSTACLE       (2) static obstruction — boxes, pallets, machines, pipes,
+                     puddles, spills, wet floors, leaks, generic debris
+  FOOD           (2) edible items / food debris — apple, banana, sandwich,
+                     bread, food wrapper, crumbs
+  SAFETY_MARKER  (3) hazard signage — cones, signs, barriers, caution tape,
+                     bollards, safety lines
+  VEHICLE        (4) motorized / large mobile — cars, forklifts, trucks, carts
+  ANIMAL         (4) non-human living creatures — dogs, cats, birds, livestock
+  HUMAN          (5) any person, body part, or protective gear (helmet, vest)
 
 Rules:
 - Output ONLY the group name in uppercase. No punctuation, no explanation.
 - When genuinely uncertain, choose OBSTACLE — that keeps the robot safe.
 - Protective equipment (helmet, vest, hard hat) -> HUMAN (indicates a person).
-- Painted lines / floor markings -> SURFACE (robot drives on them)."""
+- Painted lines / floor markings -> SURFACE (robot drives on them).
+- Liquid on the floor (spill, puddle, wet floor) -> OBSTACLE.
+- The SIGN for a wet floor -> SAFETY_MARKER, but the wet patch itself -> OBSTACLE."""
 
 
 def classify_label(client: OpenAI, label: str) -> str:
@@ -123,7 +143,10 @@ def classify_label(client: OpenAI, label: str) -> str:
     except Exception:
         raw = ""
 
-    valid = {"SURFACE", "BACKGROUND", "SAFETY_MARKER", "OBSTACLE", "VEHICLE", "HUMAN"}
+    valid = {
+        "SURFACE", "BACKGROUND", "OBSTACLE", "FOOD",
+        "SAFETY_MARKER", "VEHICLE", "ANIMAL", "HUMAN",
+    }
     return raw if raw in valid else "OBSTACLE"
 
 

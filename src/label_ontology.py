@@ -4,14 +4,22 @@ Unified Label Ontology — single source of truth for all label -> risk group ma
 Risk levels (0–5):
   0  SURFACE        navigable floor — robot drives ON it, never a hazard
   1  BACKGROUND     irrelevant background (sky, wall, generic objects)
-  2  SAFETY_MARKER  hazard indicators (cone, sign, barrier, caution tape)
-  3  OBSTACLE       static physical obstruction (box, barrel, crate, pallet)
-  3  UNKNOWN        label not (yet) in any alias bucket — conservative medium risk
+  2  OBSTACLE       static obstructions (box, pallet, puddle, wet floor, debris)
+  2  FOOD           edible items / food debris on the floor
+  3  SAFETY_MARKER  hazard indicators (cone, sign, barrier, caution tape)
+  3  UNKNOWN        label not (yet) in any alias bucket — conservative mid-high risk
   4  VEHICLE        motorized or large mobile objects (forklift, car, truck)
+  4  ANIMAL         living non-human creatures (dog, cat, bird, livestock)
   5  HUMAN          any person or their presence indicator
 
-  Note: head / helmet / hat / safety vest all map to HUMAN (risk=5) — they
-  indicate human proximity and must not form a separate lower-risk class.
+  Notes:
+  - Puddles, spills, and wet floors are OBSTACLE (risk=2) — small physical
+    hazards to drive around. The matching SIGN ("wet floor sign") is a
+    SAFETY_MARKER (risk=3).
+  - Animals are ANIMAL (risk=4) — same tier as VEHICLE because they move
+    unpredictably, but a separate group so they can be reasoned about.
+  - head / helmet / hat / safety vest all map to HUMAN (risk=5) — they
+    indicate human proximity and must not form a separate lower-risk class.
 
 Matching strategy (get_risk_group):
   1. Exact match on normalized label (includes persisted learned aliases)
@@ -19,11 +27,11 @@ Matching strategy (get_risk_group):
   3. Fallback -> UNKNOWN (risk=3, flagged `unmapped=True`) — fail-safe
 
 Auto-learning:
-  Labels that hit the UNKNOWN fallback can be classified into one of the 6
-  real groups via `segment_module.llm_objects.classify_and_learn`, which calls
-  `register_learned_alias(label, group)`. The mapping is persisted to
-  `data/learned_aliases.json` and auto-loaded on next import, so the ontology
-  grows as the LLM produces new phrasings.
+  Labels that hit the UNKNOWN fallback can be classified into one of the 8
+  real groups via `segment_module.llm_objects.classify_and_learn` (LLM) or
+  `classify_and_learn_interactive` (user stdin). Both call
+  `register_learned_alias(label, group)`, which persists the mapping to
+  `data/learned_aliases.json` and auto-loads it on next import.
 """
 
 from __future__ import annotations
@@ -38,17 +46,20 @@ from pathlib import Path
 GROUP_RISK: dict[str, int] = {
     "SURFACE":       0,
     "BACKGROUND":    1,
-    "SAFETY_MARKER": 2,
-    "OBSTACLE":      3,
-    "UNKNOWN":       3,   # fail-safe fallback for unseen labels — same risk as OBSTACLE
+    "OBSTACLE":      2,
+    "FOOD":          2,
+    "SAFETY_MARKER": 3,
+    "UNKNOWN":       3,   # fail-safe fallback for unseen labels — SAFETY_MARKER-tier
     "VEHICLE":       4,
+    "ANIMAL":        4,
     "HUMAN":         5,
 }
 
-# Groups the LLM classifier is allowed to pick when learning a new alias.
-# UNKNOWN is excluded — it must resolve to a concrete class.
+# Groups the classifier (LLM or human) is allowed to pick when learning a new
+# alias. UNKNOWN is excluded — it must resolve to a concrete class.
 _CLASSIFIABLE_GROUPS: frozenset[str] = frozenset({
-    "SURFACE", "BACKGROUND", "SAFETY_MARKER", "OBSTACLE", "VEHICLE", "HUMAN",
+    "SURFACE", "BACKGROUND", "OBSTACLE", "FOOD",
+    "SAFETY_MARKER", "VEHICLE", "ANIMAL", "HUMAN",
 })
 
 # ---------------------------------------------------------------------------
@@ -87,27 +98,7 @@ ALIAS_GROUPS: dict[str, list[list[str]]] = {
         ["column", "support column"],
     ],
 
-    # ── SAFETY_MARKER (risk 2) — hazard indicators ────────────────────────────
-    "SAFETY_MARKER": [
-        ["cone", "traffic cone", "safety cone", "orange cone", "road cone", "delineator"],
-        ["traffic sign", "road sign", "warning sign", "hazard sign", "safety sign"],
-        ["stop sign", "stop board"],
-        ["traffic light", "traffic signal", "stoplight"],
-        ["wet floor sign", "caution wet floor", "wet floor warning", "caution sign"],
-        # Spills / puddles — slip hazards, not obstacles
-        ["spill", "liquid spill", "oil spill", "chemical spill"],
-        ["puddle", "water puddle", "wet patch", "wet floor"],
-        ["barrier", "safety barrier", "jersey barrier", "water barrier"],
-        ["caution tape", "warning tape", "hazard tape", "barrier tape",
-         "yellow tape", "danger tape", "safety tape"],
-        ["bollard", "safety bollard"],
-        ["fire extinguisher", "extinguisher"],
-        ["speed bump", "speed hump", "road bump"],
-        ["emergency exit sign", "exit sign", "fire exit"],
-        ["safety line", "painted safety line", "yellow safety line"],
-    ],
-
-    # ── OBSTACLE (risk 3) — static physical obstructions ─────────────────────
+    # ── OBSTACLE (risk 2) — static obstructions, incl. puddles / wet floors ──
     "OBSTACLE": [
         ["barrel", "oil barrel", "metal barrel", "drum barrel"],
         ["drum", "chemical drum", "plastic drum", "oil drum"],
@@ -126,20 +117,59 @@ ALIAS_GROUPS: dict[str, list[list[str]]] = {
         ["machine", "industrial machine"],
         ["cable", "wire", "cable bundle"],
         ["table", "work table", "desk"],
-        # Animals — living but classed as physical obstructions within the 6 groups.
-        # If you want stricter handling (unpredictable movement), override via
-        # the interactive classifier to promote them to HUMAN- or VEHICLE-tier.
-        ["dog", "puppy", "stray dog"],
-        ["cat", "kitten", "stray cat"],
-        ["bird", "pigeon", "chicken", "duck"],
-        ["animal", "livestock", "cow", "horse", "sheep", "goat", "pig"],
-        ["rodent", "rat", "mouse"],
-        # Food / floor debris — small items to avoid driving over
+        # Liquid hazards on the floor — physical obstacles to drive around.
+        # NOTE: "wet floor sign" (the signage) stays in SAFETY_MARKER below;
+        # the longer alias wins via word-boundary matching.
+        ["spill", "liquid spill", "oil spill", "chemical spill"],
+        ["puddle", "water puddle", "wet patch", "wet floor", "standing water"],
+        ["leak", "liquid leak", "fluid leak", "coolant leak"],
+        # Generic floor debris (not food-specific)
         ["bottle", "water bottle", "plastic bottle", "glass bottle"],
         ["can", "soda can", "tin can", "aluminium can", "aluminum can"],
         ["cup", "paper cup", "coffee cup", "disposable cup"],
         ["trash", "litter", "rubbish", "debris", "waste"],
-        ["food", "food item", "apple", "banana", "sandwich", "bread", "food wrapper"],
+    ],
+
+    # ── FOOD (risk 2) — edible items / food debris on the floor ──────────────
+    "FOOD": [
+        ["food", "food item", "meal"],
+        ["apple", "fruit", "orange", "banana"],
+        ["sandwich", "burger", "pizza", "slice"],
+        ["bread", "loaf", "bun", "roll"],
+        ["food wrapper", "snack wrapper", "candy wrapper", "chip bag"],
+        ["crumbs", "food crumbs"],
+    ],
+
+    # ── SAFETY_MARKER (risk 3) — hazard indicators / signage ─────────────────
+    "SAFETY_MARKER": [
+        ["cone", "traffic cone", "safety cone", "orange cone", "road cone", "delineator"],
+        ["traffic sign", "road sign", "warning sign", "hazard sign", "safety sign"],
+        ["stop sign", "stop board"],
+        ["traffic light", "traffic signal", "stoplight"],
+        ["wet floor sign", "caution wet floor", "wet floor warning", "caution sign"],
+        ["barrier", "safety barrier", "jersey barrier", "water barrier"],
+        ["caution tape", "warning tape", "hazard tape", "barrier tape",
+         "yellow tape", "danger tape", "safety tape"],
+        ["bollard", "safety bollard"],
+        ["fire extinguisher", "extinguisher"],
+        ["speed bump", "speed hump", "road bump"],
+        ["emergency exit sign", "exit sign", "fire exit"],
+        ["safety line", "painted safety line", "yellow safety line"],
+    ],
+
+    # ── ANIMAL (risk 4) — living non-human creatures ─────────────────────────
+    # Same risk tier as VEHICLE: unpredictable movement, avoid at distance.
+    "ANIMAL": [
+        ["dog", "puppy", "stray dog"],
+        ["cat", "kitten", "stray cat"],
+        ["bird", "pigeon", "chicken", "duck", "goose"],
+        ["animal", "livestock"],
+        ["cow", "bull", "cattle"],
+        ["horse", "pony"],
+        ["sheep", "goat", "lamb"],
+        ["pig", "hog", "swine"],
+        ["rodent", "rat", "mouse"],
+        ["deer", "wildlife"],
     ],
 
     # ── VEHICLE (risk 4) — motorized or large mobile objects ─────────────────
@@ -315,10 +345,14 @@ def get_risk_group(category_name: str) -> dict:
         the label to `classify_and_learn` to promote it into a real group.
 
     Examples:
-        get_risk_group("person")        -> {"group": "HUMAN",    "risk_score": 5, "unmapped": False}
-        get_risk_group("parking lot")   -> {"group": "SURFACE",  "risk_score": 0, "unmapped": False}
-        get_risk_group("cardboard box") -> {"group": "OBSTACLE", "risk_score": 3, "unmapped": False}
-        get_risk_group("some new thing")-> {"group": "UNKNOWN",  "risk_score": 3, "unmapped": True}
+        get_risk_group("person")        -> {"group": "HUMAN",         "risk_score": 5, "unmapped": False}
+        get_risk_group("dog")           -> {"group": "ANIMAL",        "risk_score": 4, "unmapped": False}
+        get_risk_group("forklift")      -> {"group": "VEHICLE",       "risk_score": 4, "unmapped": False}
+        get_risk_group("cone")          -> {"group": "SAFETY_MARKER", "risk_score": 3, "unmapped": False}
+        get_risk_group("puddle")        -> {"group": "OBSTACLE",      "risk_score": 2, "unmapped": False}
+        get_risk_group("apple")         -> {"group": "FOOD",          "risk_score": 2, "unmapped": False}
+        get_risk_group("parking lot")   -> {"group": "SURFACE",       "risk_score": 0, "unmapped": False}
+        get_risk_group("some new thing")-> {"group": "UNKNOWN",       "risk_score": 3, "unmapped": True}
     """
     norm = normalize(category_name)
 
@@ -355,12 +389,14 @@ def get_canonical(category_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 _INTERACTIVE_MENU: list[tuple[str, str, str]] = [
-    ("1", "SURFACE",       "navigable ground (floor, road, parking lot)"),
-    ("2", "BACKGROUND",    "walls, ceiling, sky, windows"),
-    ("3", "SAFETY_MARKER", "cones, signs, barriers, caution tape, spills"),
-    ("4", "OBSTACLE",      "static objects: boxes, pallets, animals, debris"),
-    ("5", "VEHICLE",       "forklifts, cars, trucks, AGVs"),
-    ("6", "HUMAN",         "persons, body parts, protective gear"),
+    ("1", "SURFACE",       "risk 0 - navigable ground (floor, road, parking lot)"),
+    ("2", "BACKGROUND",    "risk 1 - walls, ceiling, sky, windows"),
+    ("3", "OBSTACLE",      "risk 2 - boxes, pallets, puddles, spills, debris"),
+    ("4", "FOOD",          "risk 2 - edible items, food wrappers, crumbs"),
+    ("5", "SAFETY_MARKER", "risk 3 - cones, signs, barriers, caution tape"),
+    ("6", "VEHICLE",       "risk 4 - forklifts, cars, trucks, AGVs"),
+    ("7", "ANIMAL",        "risk 4 - dogs, cats, birds, livestock"),
+    ("8", "HUMAN",         "risk 5 - persons, body parts, protective gear"),
 ]
 
 
@@ -458,6 +494,7 @@ def map_detections(detections: list[dict]) -> list[dict]:
 if __name__ == "__main__":
     print("=== Risk group resolution ===\n")
     tests = [
+        # HUMAN (5)
         ("person", "HUMAN", 5),
         ("worker", "HUMAN", 5),
         ("hard hat", "HUMAN", 5),
@@ -465,27 +502,42 @@ if __name__ == "__main__":
         ("hat", "HUMAN", 5),
         ("safety vest", "HUMAN", 5),
         ("head", "HUMAN", 5),
+        # VEHICLE (4)
         ("forklift", "VEHICLE", 4),
         ("pallet jack", "VEHICLE", 4),
-        ("pallet", "OBSTACLE", 3),        # shorter -> OBSTACLE, not VEHICLE
         ("car", "VEHICLE", 4),
-        ("cardboard box", "OBSTACLE", 3), # "car" must NOT match here
-        ("cone", "SAFETY_MARKER", 2),
-        ("traffic cone", "SAFETY_MARKER", 2),
+        # ANIMAL (4)
+        ("dog", "ANIMAL", 4),
+        ("cat", "ANIMAL", 4),
+        ("bird", "ANIMAL", 4),
+        ("cow", "ANIMAL", 4),
+        ("horse", "ANIMAL", 4),
+        ("rat", "ANIMAL", 4),
+        # SAFETY_MARKER (3)
+        ("cone", "SAFETY_MARKER", 3),
+        ("traffic cone", "SAFETY_MARKER", 3),
+        ("wet floor sign", "SAFETY_MARKER", 3),   # longer alias wins over "wet floor"
+        # OBSTACLE (2) — incl. liquid hazards + generic debris
+        ("pallet", "OBSTACLE", 2),                # shorter -> OBSTACLE, not VEHICLE
+        ("cardboard box", "OBSTACLE", 2),         # "car" must NOT match here
+        ("spill", "OBSTACLE", 2),
+        ("puddle", "OBSTACLE", 2),
+        ("wet floor", "OBSTACLE", 2),
+        ("leak", "OBSTACLE", 2),
+        ("bottle", "OBSTACLE", 2),
+        ("trash", "OBSTACLE", 2),
+        # FOOD (2)
+        ("apple", "FOOD", 2),
+        ("banana", "FOOD", 2),
+        ("sandwich", "FOOD", 2),
+        ("food wrapper", "FOOD", 2),
+        # SURFACE (0)
         ("floor", "SURFACE", 0),
         ("parking lot", "SURFACE", 0),
         ("floor marking", "SURFACE", 0),
         ("ground", "SURFACE", 0),
-        ("dog", "OBSTACLE", 3),
-        ("cat", "OBSTACLE", 3),
-        ("bird", "OBSTACLE", 3),
-        ("cow", "OBSTACLE", 3),
-        ("bottle", "OBSTACLE", 3),
-        ("apple", "OBSTACLE", 3),
-        ("trash", "OBSTACLE", 3),
-        ("spill", "SAFETY_MARKER", 2),
-        ("puddle", "SAFETY_MARKER", 2),
-        ("unknown_label", "UNKNOWN", 3),   # fail-safe fallback, flagged for learning
+        # UNKNOWN (3) — fail-safe fallback
+        ("unknown_label", "UNKNOWN", 3),
     ]
     all_pass = True
     for label, exp_group, exp_risk in tests:

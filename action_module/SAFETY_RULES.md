@@ -22,15 +22,28 @@ These run **before** any LLM call and always provide a valid fallback.
 | CENTER      | bbox centre x ∈ [img_W/3, 2·img_W/3] |
 | PERIPHERAL  | anything outside center third          |
 
-**Risk groups** (highest → lowest):  
-`HUMAN (5) > VEHICLE (4) > OBSTACLE (3) = UNKNOWN (3) > SAFETY_MARKER (2) > BACKGROUND (1) > SURFACE (0)`
+**Risk groups** (highest → lowest):
 
-**UNKNOWN** is the fail-safe fallback for labels the ontology has never seen
-(e.g., the LLM prompt generator invents a novel phrase). It carries **risk=3**,
-identical to OBSTACLE, so it triggers SLOW under any OBSTACLE rule. It never
-silently degrades to BACKGROUND. A background job (`classify_and_learn`) then
-classifies the label into one of the 6 real groups and persists the mapping to
-`data/learned_aliases.json` so subsequent runs resolve it instantly.
+| Risk | Groups |
+|------|--------|
+| 5    | HUMAN |
+| 4    | VEHICLE, ANIMAL |
+| 3    | SAFETY_MARKER, UNKNOWN |
+| 2    | OBSTACLE, FOOD |
+| 1    | BACKGROUND |
+| 0    | SURFACE |
+
+**Group notes:**
+- **ANIMAL** (risk=4) — living non-human creatures. Same tier as VEHICLE because
+  they move unpredictably; apply VEHICLE-tier rules (slow or stop on CLOSE/CENTER).
+- **FOOD** (risk=2) — edible items / food debris (apple, banana, wrapper).
+  Same tier as OBSTACLE; apply OBSTACLE-tier rules.
+- **Puddles / spills / wet floors** are OBSTACLE (risk=2) — physical hazards
+  the robot should drive around. The matching *signage* (`wet floor sign`) is
+  still SAFETY_MARKER (risk=3).
+- **UNKNOWN** (risk=3) is the fail-safe fallback for labels the ontology has
+  never seen. It carries SAFETY_MARKER-tier risk — conservative until the
+  interactive or LLM classifier promotes it to a concrete group.
 
 **SURFACE** objects (floor, road, parking lot, floor markings, ground) are what the robot
 navigates ON. Their `proximity_label` is always `NAVIGABLE` — this is not a hazard signal.
@@ -138,5 +151,8 @@ SURFACE objects are never hazards. The robot drives on them.
 | SURFACE detected at any proximity | CONTINUE (SRF1) | Robot is on it — expected |
 | Floor marking in CENTER zone | CONTINUE (SRF1) | Painted lines are navigable |
 | proximity_label = NAVIGABLE | Skip depth rules entirely | Not a positional hazard |
-| risk_group = UNKNOWN | Apply OBSTACLE-tier rules (W5, W9, etc.) | Fail-safe: unseen label treated as physical obstruction |
-| UNKNOWN + CENTER + CLOSE | SLOW (confidence 0.60) | Matches W5 semantics; conservative until classified |
+| risk_group = UNKNOWN | Apply SAFETY_MARKER-tier rules (W7, W8) | Fail-safe: unseen label, conservative until classified |
+| UNKNOWN + CENTER + CLOSE | SLOW (confidence 0.60) | Conservative default until classifier resolves it |
+| risk_group = ANIMAL | Apply VEHICLE-tier rules (W3, W4, W10) | Unpredictable movement, same hazard profile as vehicles |
+| risk_group = FOOD | Apply OBSTACLE-tier rules (W5, W9) | Small floor items, avoid like general debris |
+| Puddle / spill in CENTER zone | SLOW (W5 as OBSTACLE) | Slip hazard treated as a physical obstruction |
