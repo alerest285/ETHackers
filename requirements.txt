@@ -1,13 +1,15 @@
-# ── Core ML ───────────────────────────────────────────────────────────────────
-# PyTorch: install manually for your platform from https://pytorch.org
-# Mac (MPS):  pip install torch torchvision
-# Linux/CUDA: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+# ── PyTorch ───────────────────────────────────────────────────────────────────
+# Install manually for your platform: https://pytorch.org
+# Mac (MPS):   pip install torch torchvision
+# Linux/CUDA:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 numpy
 scipy
 
-# ── HuggingFace (depth model) ─────────────────────────────────────────────────
+# ── HuggingFace ───────────────────────────────────────────────────────────────
+# transformers must be the git version (Qwen2.5-VL + SAM2 not in stable release yet)
 git+https://github.com/huggingface/transformers
 huggingface_hub
+accelerate
 
 # ── Detection ─────────────────────────────────────────────────────────────────
 ultralytics
@@ -16,6 +18,9 @@ ultralytics
 pillow
 opencv-python
 pycocotools
+
+# ── LLM API ───────────────────────────────────────────────────────────────────
+openai
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 tqdm

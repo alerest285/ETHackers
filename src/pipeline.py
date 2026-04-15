@@ -1,5 +1,5 @@
 """
-Main pre-processing pipeline (Phase 1–4).
+Main pre-processing pipeline (Phase 1–5).
 
 Steps:
   1. Sample N random images from the training set.
@@ -7,10 +7,12 @@ Steps:
   3. Filter with filter_module → discard images with no relevant objects.
   4. Run DepthAnything (depth_module) on remaining images.
   5. Combine YOLO boxes + depth info into a single overlay image (depth_overlay).
+  6. Run Qwen2.5-VL (llm_module) on each kept image → scene analysis text.
 
 Outputs saved to data/pipeline_output/:
   detections/<stem>.json          — YOLO detections enriched with depth info
   overlays/<stem>_overlay.png     — side-by-side: YOLO boxes | depth heatmap
+  llm/<stem>_analysis.txt         — Qwen scene description + navigation decision
   discarded/<stem>.json           — detections for discarded images (for reference)
 
 Usage:
@@ -36,8 +38,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from segment_module.segment  import load_model as load_yolo, detect_image
 from src.label_ontology      import map_detections
-from src.filter_module       import filter_images, is_interesting
+from src.filter_module       import filter_images
 from src.depth_overlay       import make_overlay
+from llm_module.llm          import get_client as get_llm_client, process_one as llm_process
 
 # ── paths ─────────────────────────────────────────────────────────────────────
 TRAIN_DIR   = Path("data/challenge/data/images/train")
@@ -45,6 +48,7 @@ OUT_ROOT    = Path("data/pipeline_output")
 OUT_DET     = OUT_ROOT / "detections"
 OUT_OVERLAY = OUT_ROOT / "overlays"
 OUT_DISC    = OUT_ROOT / "discarded"
+OUT_LLM     = OUT_ROOT / "llm"
 
 DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Small-hf"
 
@@ -167,10 +171,34 @@ def run(n: int = 5, seed: int = 42, conf: float = 0.25) -> None:
         overlay_bgr = make_overlay(image, dets_enriched, depth_map)
         cv2.imwrite(str(OUT_OVERLAY / f"{Path(name).stem}_overlay.png"), overlay_bgr)
 
+    # ── 6. LLM scene analysis ─────────────────────────────────────────────────
+    print("\nConnecting to Qwen API ...")
+    llm_client = get_llm_client()
+
+    print("Running LLM scene analysis ...")
+    for name in tqdm(kept, desc="LLM"):
+        stem         = Path(name).stem
+        overlay_path = OUT_OVERLAY / f"{stem}_overlay.png"
+        json_path    = OUT_DET    / f"{stem}.json"
+
+        original_path = None
+        for ext in [".jpg", ".jpeg", ".png"]:
+            candidate = TRAIN_DIR / (stem + ext)
+            if candidate.exists():
+                original_path = candidate
+                break
+
+        if original_path is None:
+            print(f"  [SKIP] Original image not found for {stem}")
+            continue
+
+        llm_process(llm_client, overlay_path, original_path, json_path, OUT_LLM)
+
     # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\nDone.")
     print(f"  Detections  → {OUT_DET}")
     print(f"  Overlays    → {OUT_OVERLAY}  ← open these to check the pipeline")
+    print(f"  LLM outputs → {OUT_LLM}      ← scene analysis + navigation decisions")
     print(f"  Discarded   → {OUT_DISC}")
 
 

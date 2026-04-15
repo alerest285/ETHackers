@@ -1,0 +1,13 @@
+# THEKER challenge — 5 risk-group classes
+path: /Users/raphaeldrag/Desktop/ETHackers
+train: data/challenge/data/images/train
+val:   data/challenge/data/images/val
+
+nc: 5
+names: ['HUMAN', 'VEHICLE', 'OBSTACLE', 'SAFETY_MARKER', 'BACKGROUND']
+
+# Label directories (auto-detected by Ultralytics when images/ → labels/ sibling swap)
+# Ultralytics looks for labels in the path obtained by replacing
+# 'images' with 'labels' in the image path.
+# We symlink / copy so that structure holds:
+#   data/challenge/data/labels/train/<stem>.txt
