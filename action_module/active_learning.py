@@ -372,18 +372,44 @@ def retrain(
     graphs_dir:       Path | None = None,
     labels_path:      Path = LABELS_PATH,
     pseudo_threshold: float = 0.85,
+    mode:             str = "neural",
+    pipeline_dir:     Path | None = None,
+    predictor_path:   Path | None = None,
 ) -> None:
     """
-    Train the classifier using:
-      1. Pseudo-labels from high-confidence rule engine predictions
-         (all detections in det_dir with rule conf >= pseudo_threshold).
-      2. Manual labels from labels.json, which override pseudo-labels.
+    Retrain after active labelling.
 
-    The pipeline is: StandardScaler → PCA (95% variance) → GradientBoosting.
-    PCA reduces the 43-d feature vector to ~8-15 components before the tree sees it.
+    mode="neural"  (default) — fine-tunes NeuralPredictor on human labels,
+                               then calls suggest_rule_updates() to propose
+                               SAFETY_RULES.md amendments.
+    mode="classic"           — legacy GradientBoosting + PCA path
+                               (requires graph_classifier.py to exist).
     """
     ROOT = Path(__file__).parent.parent
     sys.path.insert(0, str(ROOT))
+
+    if mode == "neural":
+        from action_module.neural_predictor import (
+            NeuralPredictor, fine_tune_from_labels, suggest_rule_updates,
+        )
+        save_path = predictor_path or ROOT / "data" / "neural_predictor.pt"
+        if not save_path.exists():
+            print(f"No NeuralPredictor checkpoint at {save_path}.")
+            print("Run: python action_module/neural_predictor.py --train  first.")
+            return
+
+        predictor = NeuralPredictor.load(str(save_path))
+        fine_tune_from_labels(
+            predictor    = predictor,
+            labels_path  = labels_path,
+            pipeline_dir = pipeline_dir or ROOT / "data" / "pipeline_output",
+            save_path    = save_path,
+        )
+        print("\nGenerating SAFETY_RULES amendment suggestions ...")
+        suggest_rule_updates(labels_path=labels_path)
+        return
+
+    # ── classic (GradientBoosting) path ───────────────────────────────────────
     from action_module.graph_classifier import GraphClassifier
 
     manual_labels = labels_as_dict(labels_path)
@@ -416,22 +442,29 @@ def retrain(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def maybe_run_active_learning(
-    buffer:       UncertaintyBuffer,
-    buffer_path:  Path,
-    det_dir:      Path,
-    graphs_dir:   Path | None = None,
-    top_k:        int  = 30,
-    strategy:     str  = "entropy",
-    headless:     bool = False,
-    export_dir:   Path | None = None,
-    img_dirs:     list[Path] | None = None,
+    buffer:         UncertaintyBuffer,
+    buffer_path:    Path,
+    det_dir:        Path,
+    graphs_dir:     Path | None = None,
+    top_k:          int  = 500,
+    strategy:       str  = "entropy",
+    headless:       bool = False,
+    export_dir:     Path | None = None,
+    img_dirs:       list[Path] | None = None,
+    mode:           str  = "neural",
+    pipeline_dir:   Path | None = None,
+    predictor_path: Path | None = None,
 ) -> None:
     """
-    Call this at the end of benchmark.py / pipeline.py to trigger the active
-    learning session automatically.
+    Call this at the end of training / benchmark to trigger active learning.
 
-    headless=True  → export review bundle, skip interactive prompt
-    headless=False → open images interactively, collect labels, retrain
+    Surfaces the top-k (default 500) highest-entropy LLM predictions for
+    human labelling, then retrains via fine_tune_from_labels + suggest_rule_updates.
+
+    mode="neural"   — fine-tune NeuralPredictor + generate rule suggestions
+    mode="classic"  — legacy GradientBoosting retrain
+    headless=True   — export review bundle, skip interactive prompt
+    headless=False  — open images interactively, collect labels, retrain
     """
     buffer.save(buffer_path)
 
@@ -439,6 +472,9 @@ def maybe_run_active_learning(
     if not samples:
         print("Active learning: no uncertain samples found.")
         return
+
+    print(f"Active learning: {len(samples)} highest-entropy samples selected "
+          f"(strategy={strategy}, top_k={top_k}).")
 
     if headless:
         if export_dir is None:
@@ -449,8 +485,14 @@ def maybe_run_active_learning(
     n_labelled = interactive_label(samples, open_images=True)
 
     if n_labelled > 0:
-        print(f"\nRetraining classifier with {len(labels_as_dict())} total labels ...")
-        retrain(det_dir, graphs_dir)
+        print(f"\nRetraining with {len(labels_as_dict())} total labels (mode={mode}) ...")
+        retrain(
+            det_dir        = det_dir,
+            graphs_dir     = graphs_dir,
+            mode           = mode,
+            pipeline_dir   = pipeline_dir,
+            predictor_path = predictor_path,
+        )
     else:
         print("No new labels — skipping retrain.")
 
@@ -471,11 +513,16 @@ def _parse_args():
     p.add_argument("--img-dir",    type=Path, action="append", dest="img_dirs",
                    default=None,
                    help="Image search directory (repeat for multiple)")
-    p.add_argument("--top-k",      type=int, default=30,
-                   help="Number of uncertain samples to present")
-    p.add_argument("--strategy",   choices=["entropy", "margin", "least_conf"],
+    p.add_argument("--top-k",           type=int, default=500,
+                   help="Number of uncertain samples to present (default 500)")
+    p.add_argument("--strategy",        choices=["entropy", "margin", "least_conf"],
                    default="entropy")
-    p.add_argument("--export",     type=Path, default=None,
+    p.add_argument("--mode",            choices=["neural", "classic"], default="neural",
+                   help="Retrain mode: neural=NeuralPredictor fine-tune, "
+                        "classic=GradientBoosting (default: neural)")
+    p.add_argument("--predictor-path",  type=Path, default=None,
+                   help="Path to neural_predictor.pt checkpoint")
+    p.add_argument("--export",          type=Path, default=None,
                    help="Export review bundle to this directory (headless mode)")
     p.add_argument("--review-dir", type=Path, default=None,
                    help="Label from an exported review bundle")
@@ -495,8 +542,13 @@ def main():
 
     # ── Retrain only ──────────────────────────────────────────────────────────
     if args.retrain:
-        retrain(args.det_dir, args.graphs_dir,
-                pseudo_threshold=args.pseudo_threshold)
+        retrain(
+            det_dir        = args.det_dir,
+            graphs_dir     = args.graphs_dir,
+            pseudo_threshold = args.pseudo_threshold,
+            mode           = args.mode,
+            predictor_path = args.predictor_path,
+        )
         return
 
     # ── Label from a downloaded bundle ────────────────────────────────────────
@@ -533,7 +585,12 @@ def main():
 
     n = interactive_label(samples, open_images=True)
     if n > 0:
-        retrain(args.det_dir, args.graphs_dir)
+        retrain(
+            det_dir        = args.det_dir,
+            graphs_dir     = args.graphs_dir,
+            mode           = args.mode,
+            predictor_path = args.predictor_path,
+        )
 
 
 if __name__ == "__main__":
