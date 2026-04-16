@@ -61,10 +61,20 @@ def _get_yolo():
 def _get_depth_pipe():
     if "depth" not in _cache:
         from transformers import pipeline as hf_pipeline
+        import torch as _torch
+        # Use GPU (cuda:0) when available, else MPS (Apple), else CPU.
+        if _torch.cuda.is_available():
+            device = 0
+        elif getattr(_torch.backends, "mps", None) and _torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = -1
         _cache["depth"] = hf_pipeline(
             task="depth-estimation",
             model="depth-anything/Depth-Anything-V2-Small-hf",
+            device=device,
         )
+        print(f"[app] DepthAnything loaded on device={device}")
     return _cache["depth"]
 
 
@@ -1116,6 +1126,23 @@ async def run_full(
                 yield chunk
 
     return StreamingResponse(serialized_gen(), media_type="application/x-ndjson")
+
+
+def _log_gpu_status():
+    try:
+        import torch as _t
+        if _t.cuda.is_available():
+            n = _t.cuda.device_count()
+            names = [_t.cuda.get_device_name(i) for i in range(n)]
+            print(f"[app] CUDA available — {n}× {', '.join(names)}")
+        elif getattr(_t.backends, "mps", None) and _t.backends.mps.is_available():
+            print("[app] Apple MPS backend available")
+        else:
+            print("[app] No accelerator detected — running on CPU")
+    except Exception as e:
+        print(f"[app] GPU probe failed: {e}")
+
+_log_gpu_status()
 
 
 if __name__ == "__main__":
