@@ -297,6 +297,41 @@
   .result-entities {
     display: flex; flex-wrap: wrap; gap: 6px;
   }
+  .r-feedback-row {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    margin-top: 4px;
+  }
+  .rfb-btn {
+    padding: 8px 14px; border-radius: 10px;
+    font-family: "Unbounded", sans-serif;
+    font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+    cursor: pointer;
+    background: rgba(255,255,255,0.03); color: var(--muted);
+    border: 1px solid var(--stroke);
+    transition: all .18s;
+  }
+  .rfb-btn:hover { transform: translateY(-1px); color: var(--text); }
+  .rfb-btn.STOP:hover     { color: var(--danger);  border-color: rgba(239,68,68,0.55); background: rgba(239,68,68,0.08); }
+  .rfb-btn.SLOW:hover     { color: var(--amber);   border-color: rgba(245,158,11,0.55); background: rgba(245,158,11,0.08); }
+  .rfb-btn.CONTINUE:hover { color: var(--emerald); border-color: rgba(16,185,129,0.55); background: rgba(16,185,129,0.08); }
+  .rfb-btn.sent {
+    opacity: 0.4; cursor: default; transform: none;
+  }
+  .rfb-note {
+    flex: 1; min-width: 140px;
+    padding: 8px 12px; border-radius: 10px;
+    font-family: "Space Grotesk", sans-serif;
+    font-size: 12px; color: var(--text);
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--stroke);
+  }
+  .rfb-note:focus { outline: none; border-color: var(--accent); }
+  .rfb-result {
+    margin-top: 8px;
+    font-size: 11.5px; color: var(--emerald);
+    min-height: 16px;
+  }
+  .rfb-result.error { color: var(--danger); }
   .r-chip {
     display: inline-flex; align-items: center; gap: 6px;
     padding: 4px 10px; border-radius: 999px;
@@ -833,6 +868,90 @@
     color: var(--muted); white-space: pre-wrap;
   }
   .scene-text .hl { color: var(--accent); }
+
+  /* Decision consensus rows */
+  .consensus {
+    margin-top: 10px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .consensus-row {
+    padding: 10px 12px; border-radius: 10px;
+    background: rgba(255,255,255,0.02);
+    border: 1px solid var(--stroke);
+  }
+  .consensus-row .cr-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 6px;
+  }
+  .consensus-row .cr-label {
+    font-family: "Unbounded", "Space Grotesk", sans-serif;
+    font-size: 10.5px; font-weight: 500;
+    letter-spacing: -0.01em; color: var(--text);
+  }
+  .consensus-row .cr-action {
+    font-family: "Unbounded", sans-serif;
+    font-size: 9.5px; font-weight: 600; letter-spacing: 0.02em;
+    padding: 2px 7px; border-radius: 4px;
+  }
+  .consensus-row .cr-action.STOP     { color: var(--danger);  background: rgba(239,68,68,0.12); }
+  .consensus-row .cr-action.SLOW     { color: var(--amber);   background: rgba(245,158,11,0.12); }
+  .consensus-row .cr-action.CONTINUE { color: var(--emerald); background: rgba(16,185,129,0.12); }
+  .consensus-row .cr-bars {
+    display: flex; gap: 4px; margin-top: 4px;
+  }
+  .consensus-row .cr-bar {
+    flex: 1; height: 6px; border-radius: 3px;
+    background: rgba(255,255,255,0.04); position: relative; overflow: hidden;
+  }
+  .consensus-row .cr-bar > span {
+    position: absolute; inset: 0;
+    transform-origin: left;
+    transform: scaleX(0);
+    transition: transform .6s cubic-bezier(0.2,0.8,0.2,1);
+    border-radius: 3px;
+  }
+  .consensus-row .cr-bar.STOP     > span { background: var(--danger);  box-shadow: 0 0 6px rgba(239,68,68,0.35); }
+  .consensus-row .cr-bar.SLOW     > span { background: var(--amber);   box-shadow: 0 0 6px rgba(245,158,11,0.35); }
+  .consensus-row .cr-bar.CONTINUE > span { background: var(--emerald); box-shadow: 0 0 6px rgba(16,185,129,0.35); }
+  .consensus-row .cr-pct {
+    display: flex; gap: 4px; margin-top: 4px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 8.5px; color: var(--dim); letter-spacing: 0.04em;
+  }
+  .consensus-row .cr-pct span { flex: 1; text-align: center; }
+  .consensus-row .cr-entropy {
+    margin-top: 8px; font-size: 10px; color: var(--muted);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .consensus-row .cr-ent-bar {
+    flex: 1; height: 3px; border-radius: 2px;
+    background: rgba(255,255,255,0.04); position: relative; overflow: hidden;
+  }
+  .consensus-row .cr-ent-bar > span {
+    position: absolute; top: 0; left: 0; bottom: 0;
+    background: linear-gradient(90deg, var(--emerald), var(--amber) 50%, var(--danger));
+    transition: width .6s;
+  }
+  .consensus-row .cr-features {
+    display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px;
+  }
+  .consensus-row .cr-feat {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 9px; color: var(--muted);
+    padding: 2px 6px; border-radius: 4px;
+    background: rgba(255,255,255,0.03); border: 1px solid var(--stroke);
+    letter-spacing: 0.02em;
+  }
+  .consensus-flag {
+    margin-top: 10px; padding: 8px 12px; border-radius: 8px;
+    font-size: 10.5px;
+    font-family: "Unbounded", sans-serif;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .consensus-flag.agree    { background: rgba(16,185,129,0.08); color: var(--emerald);
+                              border: 1px solid rgba(16,185,129,0.25); }
+  .consensus-flag.disagree { background: rgba(245,158,11,0.08); color: var(--amber);
+                              border: 1px solid rgba(245,158,11,0.25); }
 
   /* Understanding panel */
   .understanding {
@@ -1498,6 +1617,7 @@
       <div class="understanding" id="understanding">
         <div class="placeholder">LLM reasoning appears here</div>
       </div>
+      <div class="consensus" id="consensus" style="display:none;"></div>
       <div class="verdict" id="sidebar-verdict" style="display:none;">
         <div class="v-action" id="sidebar-action">—</div>
         <div class="v-conf"   id="sidebar-conf"></div>
@@ -1598,6 +1718,19 @@
       <span class="rlabel">Entities</span>
       <div class="result-entities" id="r-entities"></div>
     </div>
+
+    <!-- Human-in-the-loop feedback -->
+    <div class="result-reasoning" id="r-feedback">
+      <span class="rlabel">Does this decision look right?</span>
+      <div class="r-feedback-row">
+        <button class="rfb-btn STOP"     onclick="submitCorrection('STOP')">STOP</button>
+        <button class="rfb-btn SLOW"     onclick="submitCorrection('SLOW')">SLOW</button>
+        <button class="rfb-btn CONTINUE" onclick="submitCorrection('CONTINUE')">CONTINUE</button>
+        <input type="text" id="r-feedback-note" placeholder="Optional note…" class="rfb-note" />
+      </div>
+      <div id="r-feedback-result" class="rfb-result"></div>
+    </div>
+
     <div class="result-actions">
       <button class="result-btn" onclick="toggleDrawer(); hideResult();">View JSON outputs</button>
       <button class="result-btn primary" onclick="hideResult()">Inspect the 3D scene</button>
@@ -2291,6 +2424,90 @@ function showDecision(ev) {
   const reasoning = (ev.reasons && ev.reasons[0]) || "Scene assessed. No further reasoning provided.";
   $("understanding-status").textContent = "live";
   typewriteInto($("understanding"), reasoning, 46);
+
+  // Consensus panel across all three decision sources
+  renderConsensus(ev.sources || {}, ev.consensus);
+}
+
+function renderConsensus(sources, consensus) {
+  const el = $("consensus");
+  if (!el) return;
+  const entries = Object.entries(sources);
+  if (!entries.length) { el.style.display = "none"; return; }
+  el.innerHTML = "";
+  el.style.display = "flex";
+
+  for (const [key, src] of entries) {
+    const row = document.createElement("div");
+    row.className = "consensus-row";
+    const label  = src.label || key;
+    const action = (src.action || "").toUpperCase();
+    const conf   = (typeof src.confidence === "number") ? (src.confidence * 100) | 0 : null;
+    const probs  = src.probabilities || null;
+
+    let html = `<div class="cr-head">
+      <span class="cr-label">${label}</span>
+      <span>
+        ${conf != null ? `<span class="cr-meta">${conf}%</span>` : ""}
+        ${action ? `<span class="cr-action ${action}">${action}</span>` : ""}
+      </span>
+    </div>`;
+
+    if (src.error) {
+      html += `<div class="cr-entropy" style="color:var(--danger)">error: ${src.error}</div>`;
+    } else if (probs) {
+      const pS = Math.max(0, Math.min(1, +probs.STOP     || 0));
+      const pW = Math.max(0, Math.min(1, +probs.SLOW     || 0));
+      const pC = Math.max(0, Math.min(1, +probs.CONTINUE || 0));
+      html += `
+        <div class="cr-bars">
+          <div class="cr-bar STOP"><span style="transform:scaleX(${pS.toFixed(3)})"></span></div>
+          <div class="cr-bar SLOW"><span style="transform:scaleX(${pW.toFixed(3)})"></span></div>
+          <div class="cr-bar CONTINUE"><span style="transform:scaleX(${pC.toFixed(3)})"></span></div>
+        </div>
+        <div class="cr-pct">
+          <span>STOP ${(pS*100|0)}%</span>
+          <span>SLOW ${(pW*100|0)}%</span>
+          <span>CONT ${(pC*100|0)}%</span>
+        </div>`;
+
+      if (typeof src.entropy === "number") {
+        const entPct = Math.min(100, (src.entropy / 1.585) * 100) | 0;
+        html += `
+          <div class="cr-entropy">
+            <span>entropy</span>
+            <div class="cr-ent-bar"><span style="width:${entPct}%"></span></div>
+            <span class="mono">${src.entropy.toFixed(2)}</span>
+          </div>`;
+      }
+
+      if (src.top_features) {
+        const feats = Object.entries(src.top_features).slice(0, 5);
+        if (feats.length) {
+          html += `<div class="cr-features">` +
+            feats.map(([k, val]) => {
+              const vs = (typeof val === "number")
+                ? ` <span style="color:var(--accent)">${val.toFixed(2)}</span>` : "";
+              return `<span class="cr-feat">${k}${vs}</span>`;
+            }).join("") +
+            `</div>`;
+        }
+      }
+    } else if (src.reasoning) {
+      html += `<div class="cr-entropy">${src.reasoning}</div>`;
+    }
+
+    row.innerHTML = html;
+    el.appendChild(row);
+  }
+
+  // Consensus banner
+  const flag = document.createElement("div");
+  flag.className = "consensus-flag " + (consensus ? "agree" : "disagree");
+  flag.innerHTML = consensus
+    ? `✓ All sources agree`
+    : `⚠ Sources disagree — review carefully`;
+  el.appendChild(flag);
 }
 
 /* ─── JSON drawer ────────────────────────────────────── */
@@ -2356,6 +2573,7 @@ function resetUiState() {
   $("entity-count").textContent = "0";
   $("scene-text").innerHTML = `<div class="placeholder">Analyzing…</div>`;
   $("understanding").innerHTML = `<div class="placeholder">Reasoning will type out when the decision completes</div>`;
+  $("consensus").innerHTML = ""; $("consensus").style.display = "none";
   $("sidebar-verdict").style.display = "none";
   $("understanding-status").textContent = "";
   if (typewriterTimer) { clearInterval(typewriterTimer); clearTimeout(typewriterTimer); }
@@ -2593,6 +2811,7 @@ window.newImage = function() {
   $("nowplaying").classList.remove("on");
   $("topbar").style.setProperty("--progress", "0%");
   $("understanding").innerHTML = `<div class="placeholder">LLM reasoning appears here</div>`;
+  $("consensus").innerHTML = ""; $("consensus").style.display = "none";
   $("sidebar-verdict").style.display = "none";
   $("understanding-status").textContent = "";
   stagesCompleted = 0; finalRuntime = 0;
@@ -2703,6 +2922,13 @@ function handleEvent(run, ev) {
 }
 
 function populateResult(ev) {
+  // Reset correction row so repeat runs can give new feedback
+  document.querySelectorAll(".rfb-btn").forEach(b => {
+    b.classList.remove("sent"); b.disabled = false;
+  });
+  const fbNote = $("r-feedback-note"); if (fbNote) fbNote.value = "";
+  const fbRes  = $("r-feedback-result"); if (fbRes)  { fbRes.textContent = ""; fbRes.classList.remove("error"); }
+
   $("r-verdict").textContent = ev.label || "—";
   $("r-verdict").style.setProperty("--verdict-color", ev.color || "#00d4ff");
   $("r-conf").innerHTML = (typeof ev.confidence === "number")
@@ -2742,6 +2968,51 @@ window.showResult = function() {
 };
 window.hideResult = function() {
   $("result-veil").classList.remove("on");
+};
+
+window.submitCorrection = async function(correct_action) {
+  if (!activeRun || !activeRun.rawData?.decision) return;
+  const dec = activeRun.rawData.decision;
+  const meta = dec.meta || {};
+  const srcs = meta.sources || dec.sources || {};
+  const actor = srcs.llm_actor || {};
+  const note = ($("r-feedback-note")?.value || "").trim();
+  const payload = {
+    stem: activeRun.file?.name || meta.stem || "webui",
+    predicted_action: (dec.label || meta.action || "").toUpperCase(),
+    correct_action: correct_action,
+    predicted_confidence: dec.confidence ?? meta.confidence ?? 0,
+    entropy: actor.entropy ?? 0,
+    reasoning: dec.reasons?.[0] || meta.reasoning || "",
+    user_note: note,
+    scene_summary: activeRun.rawData.scene_data?.text || "",
+  };
+  const result = $("r-feedback-result");
+  // Mark all buttons as sent; highlight the chosen one
+  document.querySelectorAll(".rfb-btn").forEach(b => {
+    b.classList.add("sent");
+    b.disabled = true;
+  });
+  result.classList.remove("error");
+  result.textContent = "Sending…";
+  try {
+    const resp = await fetch("/correction", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    const verb = payload.predicted_action === correct_action ? "Reinforcement" : "Correction";
+    result.textContent = `✓ ${verb} saved — ${data.total} total feedback entries.`;
+  } catch (err) {
+    result.classList.add("error");
+    result.textContent = `Failed: ${err.message || err}`;
+    // Re-enable on error so the user can retry
+    document.querySelectorAll(".rfb-btn").forEach(b => {
+      b.classList.remove("sent"); b.disabled = false;
+    });
+  }
 };
 </script>
 </body>

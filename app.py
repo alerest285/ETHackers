@@ -29,7 +29,7 @@ import cv2
 import numpy as np
 import uvicorn
 from fastapi import FastAPI, File, Form, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
@@ -439,6 +439,58 @@ app.mount("/media",  StaticFiles(directory="ui_media"), name="media")
 @app.get("/")
 def index():
     return FileResponse("static/index.html")
+
+
+# ── Human feedback endpoint ───────────────────────────────────────────────────
+# Records a user correction to data/pipeline_output/human_corrections.json
+# so the rule-updater can later re-learn from them.
+CORRECTIONS_PATH = ROOT / "data" / "pipeline_output" / "human_corrections.json"
+
+
+from fastapi import Request
+
+@app.post("/correction")
+async def record_correction(request: Request):
+    import time as _time
+    data = await request.json()
+    entry = {
+        "type":               "correction" if data.get("predicted_action") != data.get("correct_action") else "reinforcement",
+        "stem":               str(data.get("stem", "")),
+        "predicted_action":   str(data.get("predicted_action", "")).upper(),
+        "correct_action":     str(data.get("correct_action", "")).upper(),
+        "predicted_confidence": float(data.get("predicted_confidence", 0.0) or 0.0),
+        "entropy":            float(data.get("entropy", 0.0) or 0.0),
+        "reasoning":          str(data.get("reasoning", "")),
+        "user_note":          str(data.get("user_note", "")),
+        "scene_summary":      str(data.get("scene_summary", "")),
+        "timestamp":          _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+    }
+    CORRECTIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    existing = []
+    if CORRECTIONS_PATH.exists():
+        try:
+            existing = json.loads(CORRECTIONS_PATH.read_text(encoding="utf-8"))
+            if not isinstance(existing, list):
+                existing = []
+        except Exception:
+            existing = []
+    existing.append(entry)
+    CORRECTIONS_PATH.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    return JSONResponse({"ok": True, "total": len(existing), "entry": entry})
+
+
+@app.get("/entropy_log")
+def entropy_log():
+    """Top uncertain frames, for an optional 'most ambiguous' dashboard."""
+    p = ROOT / "data" / "pipeline_output" / "llm_actor_entropy.json"
+    if not p.exists():
+        return JSONResponse({"entries": []})
+    try:
+        entries = json.loads(p.read_text(encoding="utf-8"))
+        entries.sort(key=lambda x: x.get("entropy", 0), reverse=True)
+        return JSONResponse({"entries": entries[:20]})
+    except Exception as e:
+        return JSONResponse({"entries": [], "error": str(e)})
 
 
 class _SafeEncoder(json.JSONEncoder):
@@ -932,24 +984,124 @@ async def run_full(
 
         if action_result is None:
             # Fallback to heuristic critic
-            action_result = _make_decision(enriched or [])
+            fallback = _make_decision(enriched or [])
             action_result = {
-                "action": action_result.get("label", "CONTINUE"),
+                "action": fallback.get("label", "CONTINUE"),
                 "confidence": 0.55,
-                "reasoning": "; ".join(action_result.get("reasons", [])) or "Heuristic fallback.",
+                "reasoning": "; ".join(fallback.get("reasons", [])) or "Heuristic fallback.",
             }
 
         action = action_result.get("action", "CONTINUE").upper()
         conf = float(action_result.get("confidence", 0.5))
         reasoning = action_result.get("reasoning", "")
         color_map = {"STOP": "#ef4444", "SLOW": "#f59e0b", "CONTINUE": "#10b981"}
+
+        # ── Secondary decision sources: LLMActor + GraphClassifier ─────────
+        # Run in parallel (both are independent of each other and of the above)
+        # so we can present a consensus view in the UI.
+        sources = {
+            "llm_rules": {
+                "label": "LLM + SAFETY_RULES.md",
+                "action": action,
+                "confidence": conf,
+                "reasoning": reasoning,
+                "probabilities": None,
+            }
+        }
+
+        # LLMActor — gives us action probabilities + entropy
+        stem_for_logs = f"webui_{int(time.time()*1000)}" if False else "webui"
+        try:
+            import time as _time
+            stem_for_logs = f"webui_{int(_time.time())}"
+        except Exception:
+            pass
+
+        try:
+            from llm_action_module.actor import LLMActor
+            actor = _cache.get("llm_actor")
+            if actor is None:
+                actor = LLMActor()
+                _cache["llm_actor"] = actor
+
+            # LLMActor expects optional image paths + depth/pointcloud arrays.
+            import tempfile as _tempfile
+            seg_tmp = None
+            depth_tmp = None
+            try:
+                if sam_results:
+                    seg_img = Image.fromarray(_overlay_masks_on(base_bgr, sam_results)
+                                              [..., ::-1])  # BGR→RGB
+                    seg_tmp = _tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
+                    seg_img.save(seg_tmp)
+                if corrected is not None:
+                    heat_bgr = _depth_blend_on(base_bgr, corrected)
+                    heat_rgb = cv2.cvtColor(heat_bgr, cv2.COLOR_BGR2RGB)
+                    depth_tmp = _tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
+                    Image.fromarray(heat_rgb).save(depth_tmp)
+
+                actor_result = actor.query(
+                    scene_graph_text=scene_text,
+                    seg_img_path=Path(seg_tmp) if seg_tmp else None,
+                    depth_img_path=Path(depth_tmp) if depth_tmp else None,
+                    depth_arr=corrected,
+                    point_cloud=None,
+                    stem=stem_for_logs,
+                )
+                sources["llm_actor"] = {
+                    "label": "LLM Actor",
+                    "action": actor_result.get("action"),
+                    "confidence": float(actor_result.get("confidence", 0.5)),
+                    "reasoning": actor_result.get("reasoning", ""),
+                    "probabilities": actor_result.get("probabilities"),
+                    "entropy": float(actor_result.get("entropy", 0.0)),
+                }
+            finally:
+                for p in (seg_tmp, depth_tmp):
+                    if p:
+                        try: _os.unlink(p)
+                        except Exception: pass
+        except Exception as e:
+            traceback.print_exc()
+            sources["llm_actor"] = {"label": "LLM Actor", "error": str(e)}
+
+        # GraphClassifier — 43-dim feature vector → rule or ML probabilities
+        try:
+            from action_module.graph_classifier import GraphClassifier
+            clf = _cache.get("graph_classifier")
+            if clf is None:
+                clf = GraphClassifier()
+                _cache["graph_classifier"] = clf
+            clf_result = clf.predict(enriched or [], None, pil)
+            sources["graph_classifier"] = {
+                "label": "Graph Classifier",
+                "action": clf_result.get("action"),
+                "confidence": float(clf_result.get("confidence", 0.5)),
+                "probabilities": clf_result.get("probabilities"),
+                "top_features": clf_result.get("top_features"),
+                "classifier_source": clf_result.get("source"),
+            }
+        except Exception as e:
+            traceback.print_exc()
+            sources["graph_classifier"] = {"label": "Graph Classifier", "error": str(e)}
+
+        # Consensus: do the sources that returned an action agree?
+        actions_seen = [s.get("action") for s in sources.values() if s.get("action")]
+        consensus = (len(set(actions_seen)) == 1) if actions_seen else False
+
         yield _event("decision", "ok", title="Navigation decision",
                      label=action,
                      color=color_map.get(action, "#10b981"),
                      reasons=[reasoning] if reasoning else ["No reasoning provided."],
                      confidence=conf,
+                     sources=sources,
+                     consensus=consensus,
+                     stem=stem_for_logs,
                      meta={"action": action, "confidence": conf,
                            "reasoning": reasoning,
+                           "sources": sources,
+                           "consensus": consensus,
+                           "stem": stem_for_logs,
                            "enriched": [
                                {k: v for k, v in d.items()
                                 if not isinstance(v, np.ndarray)}
