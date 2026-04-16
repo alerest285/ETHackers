@@ -17,41 +17,39 @@
 #       --image-dir /data/images/train --output-dir /output --fast --n 500
 # ===========================================================================
 
-FROM nvidia/cuda:12.8.1-devel-ubuntu22.04
+# Base image already ships with Python 3.11, PyTorch 2.8 + CUDA 12.8,
+# git, curl, libgl — no reliance on Ubuntu apt mirrors for those.
+FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-venv python3-dev python3-pip \
-    git curl wget libgl1-mesa-glx libglib2.0-0 \
-    apt-transport-https ca-certificates gnupg \
-    && rm -rf /var/lib/apt/lists/*
+# Best-effort apt install for optional extras (opencv + gnupg for gcloud).
+# Wrapped in `|| true` so a temporary Ubuntu mirror outage doesn't break the
+# build — the PyTorch base image already provides everything Python needs.
+RUN (apt-get update && apt-get install -y --no-install-recommends \
+       libgl1 libglib2.0-0 gnupg ca-certificates wget \
+       && rm -rf /var/lib/apt/lists/*) || \
+    echo "Apt install skipped (mirrors unreachable) — base image should cover essentials."
 
-# Install Google Cloud SDK (provides gsutil) — separate layer for clarity
-RUN curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
-       > /etc/apt/sources.list.d/google-cloud-sdk.list \
-    && apt-get update && apt-get install -y google-cloud-cli \
-    && rm -rf /var/lib/apt/lists/* \
-    && gsutil --version \
-    && gcloud --version
-
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3 1 && \
-    python -m pip install --upgrade pip
+# Install Google Cloud SDK via curl installer (downloads from
+# dl.google.com, independent of Ubuntu mirrors).
+RUN curl -sSL https://sdk.cloud.google.com > /tmp/gcloud-install.sh \
+    && bash /tmp/gcloud-install.sh --disable-prompts --install-dir=/usr/local \
+    && rm /tmp/gcloud-install.sh
+ENV PATH=/usr/local/google-cloud-sdk/bin:$PATH
+RUN gsutil --version && gcloud --version
 
 WORKDIR /app
 
-# PyTorch + CUDA (cached layer)
-RUN pip install --no-cache-dir \
-    torch torchvision --index-url https://download.pytorch.org/whl/cu128
+RUN pip install --no-cache-dir --upgrade pip
 
 # HuggingFace transformers from git (SAM2 + Grounding DINO support)
 RUN pip install --no-cache-dir \
     "git+https://github.com/huggingface/transformers" \
     huggingface_hub accelerate
 
-# All other deps
+# All other Python deps (PyTorch + torchvision already in base image)
 RUN pip install --no-cache-dir \
     numpy scipy scikit-learn joblib \
     anthropic pyyaml openai tqdm psutil \
