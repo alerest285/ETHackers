@@ -6,7 +6,8 @@
 <title>Navsense</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&family=Unbounded:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="icon" type="image/png" href="/media/logo-removebg-preview.png">
 <style>
   :root {
     --bg:        #0A0A0B;
@@ -33,14 +34,30 @@
     height: 100%;
   }
   body {
-    font-family: "Geist", "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+    font-family: "Space Grotesk", -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 14px; font-weight: 400; line-height: 1.5;
     -webkit-font-smoothing: antialiased;
     overflow: hidden;
   }
   .mono {
-    font-family: "Geist Mono", ui-monospace, "JetBrains Mono", monospace;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
     font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+  }
+  .serif {
+    font-family: "Instrument Serif", Georgia, serif;
+    font-style: italic;
+    font-weight: 400;
+  }
+  .display {
+    font-family: "Unbounded", "Space Grotesk", sans-serif;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+  }
+  h1, h2, h3 {
+    font-family: "Unbounded", "Space Grotesk", sans-serif;
+    letter-spacing: -0.03em;
+    font-weight: 600;
   }
 
   /* ─────────── Fullscreen 3D background ─────────── */
@@ -86,7 +103,7 @@
   .topbar {
     position: fixed; top: 16px; left: 16px; right: 16px;
     z-index: 30;
-    height: 52px;
+    height: 220px;
     padding: 0 16px;
     display: flex; align-items: center; gap: 14px;
     border-radius: 14px;
@@ -94,35 +111,235 @@
     backdrop-filter: blur(24px) saturate(140%);
     -webkit-backdrop-filter: blur(24px) saturate(140%);
     border: 1px solid var(--stroke);
+    overflow: hidden;
+    transition: background .3s, border-color .3s, height .3s;
   }
+  /* In processing/running mode the bar disappears — only the logo floats */
+  .topbar.minimal {
+    height: 132px;
+    background: transparent;
+    border-color: transparent;
+    box-shadow: none;
+    backdrop-filter: none; -webkit-backdrop-filter: none;
+    overflow: visible;
+  }
+  .topbar.minimal::before,
+  .topbar.minimal::after { display: none; }
+  .topbar.minimal .brand .brand-logo { width: 116px; height: 116px; }
+  .topbar::before {
+    content: ""; position: absolute; left: 0; bottom: 0;
+    height: 2px; width: var(--progress, 0%);
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    box-shadow: 0 0 12px rgba(0,212,255,0.6);
+    transition: width .8s cubic-bezier(0.2,0.8,0.2,1);
+  }
+  .topbar.running::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: 0;
+    height: 1px; opacity: 0.3;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    background-size: 200% 100%;
+    animation: shimmer 2.4s linear infinite;
+  }
+  @keyframes shimmer {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+
+  /* Now-playing stage in topbar */
+  .nowplaying {
+    display: none;
+    align-items: center; gap: 12px;
+    margin-left: 16px; padding: 6px 14px 6px 10px;
+    border-radius: 999px;
+    background: rgba(0,212,255,0.05);
+    border: 1px solid rgba(0,212,255,0.2);
+    font-size: 12px;
+    animation: npFadeIn .4s cubic-bezier(0.2,0.8,0.2,1);
+  }
+  @keyframes npFadeIn {
+    from { opacity: 0; transform: translateX(-8px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+  .nowplaying.on { display: inline-flex; }
+  .np-ring {
+    width: 16px; height: 16px; border-radius: 50%;
+    border: 2px solid rgba(0,212,255,0.25);
+    border-top-color: var(--accent);
+    animation: spin 1.2s linear infinite;
+  }
+  .np-body { display: flex; flex-direction: column; line-height: 1.1; }
+  .np-step { font-size: 9.5px; color: var(--dim); letter-spacing: 0.08em; }
+  .np-title {
+    font-size: 12.5px; font-weight: 500; color: var(--text);
+    letter-spacing: -0.1px; font-variation-settings: "opsz" 14;
+  }
+  .np-pulse {
+    display: inline-flex; gap: 3px; margin-left: 2px;
+  }
+  .np-pulse span {
+    width: 3px; height: 3px; border-radius: 50%; background: var(--accent);
+    animation: npBounce 1s ease-in-out infinite;
+  }
+  .np-pulse span:nth-child(2) { animation-delay: 0.15s; }
+  .np-pulse span:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes npBounce {
+    0%, 80%, 100% { transform: scale(0.5); opacity: 0.3; }
+    40%           { transform: scale(1.2); opacity: 1; }
+  }
+  .np-elapsed { font-size: 10.5px; color: var(--muted); }
+
+  /* ─────────── RESULT REVEAL MODAL ─────────── */
+  .result-veil {
+    position: fixed; inset: 0;
+    background: radial-gradient(ellipse at center, rgba(0,0,0,0.55), rgba(0,0,0,0.88));
+    backdrop-filter: blur(8px) saturate(130%);
+    -webkit-backdrop-filter: blur(8px) saturate(130%);
+    z-index: 60;
+    display: flex; align-items: center; justify-content: center;
+    padding: 40px;
+    opacity: 0; pointer-events: none;
+    transition: opacity .6s cubic-bezier(0.2,0.8,0.2,1);
+  }
+  .result-veil.on { opacity: 1; pointer-events: auto; }
+  .result-card {
+    width: min(860px, 100%);
+    background: linear-gradient(180deg, rgba(14,14,20,0.92), rgba(10,10,14,0.96));
+    border: 1px solid var(--stroke-2);
+    border-radius: 20px;
+    padding: 40px 44px 32px;
+    box-shadow:
+      0 0 0 1px rgba(255,255,255,0.04) inset,
+      0 40px 80px rgba(0,0,0,0.7),
+      0 0 120px rgba(0,212,255,0.08);
+    transform: translateY(24px) scale(0.98);
+    transition: transform .7s cubic-bezier(0.2,0.8,0.2,1);
+    position: relative;
+  }
+  .result-veil.on .result-card { transform: translateY(0) scale(1); }
+  .result-close {
+    position: absolute; top: 16px; right: 16px;
+    width: 32px; height: 32px; border-radius: 10px;
+    background: rgba(255,255,255,0.04); border: 1px solid var(--stroke);
+    color: var(--muted); cursor: pointer; font-size: 16px;
+    display: flex; align-items: center; justify-content: center;
+    transition: .15s;
+  }
+  .result-close:hover { color: var(--text); background: rgba(255,255,255,0.08); }
+  .result-eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 10.5px; font-weight: 600; letter-spacing: 0.16em;
+    text-transform: uppercase; color: var(--dim);
+    padding: 4px 10px; border-radius: 999px;
+    background: rgba(255,255,255,0.03); border: 1px solid var(--stroke);
+    margin-bottom: 18px;
+  }
+  .result-eyebrow .dot-pulse {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--emerald); box-shadow: 0 0 8px var(--emerald);
+    animation: breathe 1.8s ease-in-out infinite;
+  }
+  .result-headline {
+    font-family: "Instrument Serif", Georgia, serif;
+    font-style: italic; font-weight: 400;
+    font-size: 32px; line-height: 1.15;
+    color: var(--muted); margin-bottom: 6px;
+  }
+  .result-verdict {
+    font-family: "Bricolage Grotesque", sans-serif;
+    font-variation-settings: "opsz" 96, "wght" 700;
+    font-size: 96px; line-height: 1; letter-spacing: -0.05em;
+    margin-bottom: 10px; font-weight: 700;
+    background: linear-gradient(180deg, var(--verdict-color, #fff), color-mix(in srgb, var(--verdict-color, #fff) 70%, black));
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    text-shadow: 0 0 60px var(--verdict-color, #00d4ff);
+  }
+  .result-conf {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 12.5px; color: var(--muted);
+    margin-bottom: 26px; letter-spacing: 0.04em;
+  }
+  .result-conf b { color: var(--text); font-weight: 500; }
+  .result-reasoning {
+    padding: 16px 20px; border-radius: 12px;
+    background: rgba(255,255,255,0.03); border: 1px solid var(--stroke);
+    color: var(--text); font-size: 14.5px; line-height: 1.6;
+    font-variation-settings: "opsz" 16;
+    margin-bottom: 22px;
+  }
+  .result-reasoning .rlabel {
+    display: block;
+    font-size: 9.5px; font-weight: 600; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--dim); margin-bottom: 8px;
+  }
+  .result-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+    margin-bottom: 22px;
+  }
+  .result-kpi {
+    padding: 14px 16px; border-radius: 12px;
+    background: rgba(255,255,255,0.02); border: 1px solid var(--stroke);
+  }
+  .result-kpi .k-label {
+    font-size: 10px; font-weight: 600; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--dim); margin-bottom: 6px;
+  }
+  .result-kpi .k-val {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 22px; font-weight: 500; color: var(--text);
+    letter-spacing: -0.5px;
+  }
+  .result-kpi .k-val small {
+    font-size: 11px; color: var(--muted);
+    font-family: "Bricolage Grotesque", sans-serif; font-weight: 400;
+    margin-left: 6px;
+  }
+  .result-entities {
+    display: flex; flex-wrap: wrap; gap: 6px;
+  }
+  .r-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 999px;
+    background: rgba(255,255,255,0.03); border: 1px solid var(--stroke);
+    font-size: 11.5px; color: var(--text);
+  }
+  .r-chip .r-dot { width: 6px; height: 6px; border-radius: 50%; }
+  .result-actions {
+    display: flex; gap: 10px; justify-content: flex-end;
+    margin-top: 4px;
+  }
+  .result-btn {
+    padding: 9px 16px; border-radius: 10px;
+    font-size: 12.5px; font-weight: 500; cursor: pointer;
+    border: 1px solid var(--stroke); background: rgba(255,255,255,0.03);
+    color: var(--text);
+    transition: .15s;
+  }
+  .result-btn:hover { background: rgba(255,255,255,0.06); border-color: var(--stroke-2); }
+  .result-btn.primary {
+    background: linear-gradient(135deg, var(--accent), #0099cc);
+    color: #00131a; border-color: transparent;
+    box-shadow: 0 8px 24px rgba(0,212,255,0.25);
+  }
+  .result-btn.primary:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 12px 32px rgba(0,212,255,0.35);
+  }
+  /* Centered brand — logo only, big and unmistakable */
   .brand {
+    position: absolute; left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
     display: flex; align-items: center; gap: 10px;
-    font-weight: 600; font-size: 14.5px; letter-spacing: -0.2px;
+    pointer-events: none;
   }
-  .brand-logo {
-    width: 22px; height: 22px; border-radius: 7px;
-    background: linear-gradient(135deg, var(--accent), var(--accent-2));
-    position: relative; overflow: hidden;
-    box-shadow: 0 0 20px rgba(0,212,255,0.25);
-  }
-  .brand-logo::after {
-    content:""; position: absolute; inset: 2px; border-radius: 5px;
-    background: #050506;
-  }
-  .brand-logo::before {
-    content:""; position: absolute; inset: 7px; border-radius: 50%;
-    background: var(--accent);
-    box-shadow: 0 0 8px var(--accent);
-    animation: breathe 2.4s ease-in-out infinite;
+  .brand .brand-logo {
+    width: 200px; height: 200px;
+    object-fit: contain;
+    filter: drop-shadow(0 0 36px rgba(0,212,255,0.45));
   }
   @keyframes breathe {
     0%,100% { opacity: 1; transform: scale(1); }
     50%     { opacity: 0.55; transform: scale(0.82); }
-  }
-  .brand small {
-    font-size: 9.5px; font-weight: 500; color: var(--dim);
-    letter-spacing: 0.18em; text-transform: uppercase;
-    margin-left: 4px;
   }
   .spacer { flex: 1; }
   .pill {
@@ -138,19 +355,41 @@
     background: var(--emerald); box-shadow: 0 0 8px var(--emerald);
   }
   .icon-btn {
-    background: transparent; border: 1px solid var(--stroke);
-    color: var(--muted);
-    padding: 7px 12px; border-radius: 10px; cursor: pointer;
-    font-size: 12px; font-weight: 500;
-    display: inline-flex; align-items: center; gap: 7px;
-    transition: all .15s;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--stroke);
+    color: var(--text);
+    padding: 9px 16px; border-radius: 999px; cursor: pointer;
+    font-family: "Unbounded", "Space Grotesk", sans-serif;
+    font-size: 11.5px; font-weight: 500;
+    letter-spacing: -0.01em;
+    display: inline-flex; align-items: center; gap: 8px;
+    transition: all .18s;
   }
   .icon-btn:hover:not(:disabled) {
-    color: var(--text); border-color: var(--stroke-2);
-    background: rgba(255,255,255,0.03);
+    color: #fff; border-color: rgba(0,212,255,0.45);
+    background: rgba(0,212,255,0.05);
+    transform: translateY(-1px);
+    box-shadow: 0 8px 20px rgba(0,0,0,0.4);
   }
-  .icon-btn.danger { color: var(--danger); border-color: rgba(239,68,68,0.25); }
-  .icon-btn.danger:hover:not(:disabled) { background: rgba(239,68,68,0.08); border-color: var(--danger); }
+  .icon-btn.danger {
+    color: var(--danger);
+    border-color: rgba(239,68,68,0.3);
+    background: rgba(239,68,68,0.04);
+  }
+  .icon-btn.danger:hover:not(:disabled) {
+    background: rgba(239,68,68,0.1);
+    border-color: var(--danger); color: #ff7a7a;
+  }
+  .icon-btn.primary {
+    background: linear-gradient(135deg, rgba(0,212,255,0.15), rgba(124,58,237,0.15));
+    border-color: rgba(0,212,255,0.45);
+    color: #fff;
+    box-shadow: 0 0 0 1px rgba(0,212,255,0.25) inset, 0 8px 20px rgba(0,212,255,0.2);
+  }
+  .icon-btn.primary:hover:not(:disabled) {
+    background: linear-gradient(135deg, rgba(0,212,255,0.25), rgba(124,58,237,0.22));
+    border-color: var(--accent);
+  }
   .icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
   /* ─────────── Idle hero ─────────── */
@@ -163,17 +402,190 @@
   }
   .hero.gone { opacity: 0; pointer-events: none; }
   .hero-card {
-    width: 560px; max-width: 100%;
-    padding: 40px 36px;
+    width: 540px; max-width: 100%;
+    padding: 32px 32px 28px;
   }
+
+  /* ─── Multi-image queue strip ─── */
+  .queue-strip {
+    position: fixed; top: 164px;
+    left: 50%; transform: translateX(-50%);
+    z-index: 20;
+    max-width: calc(100vw - 32px);
+    display: none;
+    align-items: center; gap: 8px;
+    padding: 10px 12px;
+    border-radius: 16px;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.015)),
+      var(--glass-2);
+    backdrop-filter: blur(22px) saturate(150%);
+    -webkit-backdrop-filter: blur(22px) saturate(150%);
+    border: 1px solid rgba(255,255,255,0.09);
+    box-shadow: 0 1px 0 rgba(255,255,255,0.08) inset, 0 20px 48px rgba(0,0,0,0.5);
+    overflow-x: auto; overflow-y: hidden;
+    max-width: calc(100vw - 80px);
+  }
+  .queue-strip.on { display: flex; }
+  .q-label {
+    flex-shrink: 0; margin-right: 4px;
+    padding: 6px 12px; border-radius: 999px;
+    background: rgba(0,212,255,0.08);
+    border: 1px solid rgba(0,212,255,0.25);
+    color: var(--accent);
+    font-family: "Unbounded", sans-serif;
+    font-size: 10.5px; font-weight: 500;
+    letter-spacing: -0.01em;
+    display: inline-flex; align-items: center; gap: 7px;
+  }
+  .q-label::before {
+    content: ""; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent); box-shadow: 0 0 8px var(--accent);
+    animation: breathe 1.8s ease-in-out infinite;
+  }
+  .q-card {
+    position: relative;
+    flex-shrink: 0;
+    width: 88px; height: 56px;
+    border-radius: 10px; overflow: hidden;
+    cursor: pointer; border: 1.5px solid transparent;
+    background: #000;
+    transition: transform .15s, border-color .15s, box-shadow .15s;
+  }
+  .q-card:hover { transform: translateY(-1px); }
+  .q-card.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(0,212,255,0.22), 0 8px 20px rgba(0,212,255,0.25);
+  }
+  .q-card img {
+    width: 100%; height: 100%; object-fit: cover; display: block;
+    opacity: 0.7;
+  }
+  .q-card.done img    { opacity: 1; }
+  .q-card.running img { opacity: 0.6; }
+  .q-card .q-num {
+    position: absolute; top: 3px; left: 4px;
+    background: rgba(0,0,0,0.7); backdrop-filter: blur(4px);
+    color: #fff; font-family: "JetBrains Mono", monospace;
+    font-size: 9px; padding: 1px 5px; border-radius: 4px;
+    letter-spacing: 0.05em;
+  }
+  .q-card .q-progress {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    height: 3px; background: var(--accent);
+    box-shadow: 0 0 8px var(--accent);
+    width: 0%; transition: width .3s ease;
+  }
+  .q-card .q-verdict {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    padding: 4px 6px;
+    background: linear-gradient(to top, rgba(0,0,0,0.9), transparent);
+    color: #fff; font-family: "Unbounded", sans-serif;
+    font-size: 10px; font-weight: 600; letter-spacing: -0.01em;
+    display: flex; align-items: center; gap: 5px;
+    opacity: 0; transition: opacity .3s;
+  }
+  .q-card.done .q-verdict { opacity: 1; }
+  .q-card.done .q-progress { display: none; }
+  .q-card .q-verdict .v-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: currentColor; box-shadow: 0 0 6px currentColor;
+  }
+  .q-spin {
+    position: absolute; inset: 0; margin: auto;
+    width: 18px; height: 18px; border-radius: 50%;
+    border: 2px solid rgba(255,255,255,0.15);
+    border-top-color: var(--accent);
+    animation: spin .8s linear infinite; display: none;
+  }
+  .q-card.running .q-spin { display: block; }
+
+  /* Feature marquee — continuously scrolling sideways */
+  .feature-marquee {
+    position: fixed; left: 0; right: 0; bottom: 140px;
+    z-index: 8;
+    padding: 14px 0 16px;
+    pointer-events: none;
+    overflow: hidden;
+    mask-image: linear-gradient(90deg, transparent 0, #000 8%, #000 92%, transparent 100%);
+    -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 8%, #000 92%, transparent 100%);
+    transition: opacity .4s ease, transform .4s ease;
+  }
+  .feature-marquee.gone { opacity: 0; transform: translateY(16px); pointer-events: none; }
+  .fm-eyebrow {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 9.5px; font-weight: 500; letter-spacing: 0.22em;
+    text-transform: uppercase; color: var(--dim);
+    text-align: center; margin-bottom: 10px;
+  }
+  .fm-track {
+    display: flex; gap: 12px;
+    width: max-content;
+    animation: fm-scroll 55s linear infinite;
+  }
+  .feature-marquee:hover .fm-track { animation-play-state: paused; }
+  @keyframes fm-scroll {
+    0%   { transform: translateX(0); }
+    100% { transform: translateX(-50%); }
+  }
+  .fm-card {
+    flex-shrink: 0;
+    display: flex; align-items: center; gap: 14px;
+    padding: 14px 22px;
+    border-radius: 14px;
+    background: rgba(14,14,20,0.62);
+    backdrop-filter: blur(18px) saturate(140%);
+    -webkit-backdrop-filter: blur(18px) saturate(140%);
+    border: 1px solid var(--stroke);
+    pointer-events: auto;
+    transition: border-color .2s, transform .2s, box-shadow .2s;
+  }
+  .fm-card:hover {
+    border-color: rgba(0,212,255,0.35);
+    transform: translateY(-2px);
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5), 0 0 0 1px rgba(0,212,255,0.1);
+  }
+  .fm-card .fm-num {
+    font-family: "Unbounded", sans-serif;
+    font-weight: 700; font-size: 18px;
+    color: var(--accent);
+    letter-spacing: -0.04em;
+    min-width: 28px;
+  }
+  .fm-card .fm-title {
+    font-family: "Unbounded", "Space Grotesk", sans-serif;
+    font-size: 13px; font-weight: 500;
+    letter-spacing: -0.02em;
+    color: var(--text); white-space: nowrap;
+  }
+  .fm-card .fm-blurb {
+    font-size: 11.5px; color: var(--muted); white-space: nowrap;
+    margin-top: 2px;
+  }
+  .fm-card .fm-col { display: flex; flex-direction: column; }
   .hero h1 {
-    font-size: 32px; font-weight: 600; letter-spacing: -0.8px;
-    margin-bottom: 8px;
+    font-family: "Unbounded", "Space Grotesk", sans-serif;
+    font-size: 44px; font-weight: 600; letter-spacing: -0.04em;
+    line-height: 1.04;
+    margin-bottom: 14px;
+    background: linear-gradient(180deg, #fff 0%, rgba(255,255,255,0.55));
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
   }
-  .hero .tagline { color: var(--muted); font-size: 14px; margin-bottom: 28px; }
+  .hero h1 .accent {
+    font-family: "Instrument Serif", Georgia, serif;
+    font-style: italic; font-weight: 400;
+    background: none; -webkit-text-fill-color: var(--accent);
+    color: var(--accent);
+  }
+  .hero .tagline {
+    color: var(--muted); font-size: 13.5px; margin-bottom: 22px;
+    line-height: 1.5; max-width: 440px;
+    margin-left: auto; margin-right: auto;
+  }
   #drop-zone {
     border: 1px dashed var(--stroke-2);
-    border-radius: 14px; padding: 40px 20px;
+    border-radius: 12px; padding: 20px 18px;
     cursor: pointer; position: relative;
     transition: border-color .2s, background .2s;
   }
@@ -183,15 +595,15 @@
   }
   #drop-zone input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
   .dz-icon {
-    width: 44px; height: 44px; margin: 0 auto 14px;
-    border-radius: 12px;
-    background: linear-gradient(135deg, rgba(0,212,255,0.12), rgba(124,58,237,0.12));
+    width: 32px; height: 32px; margin: 0 auto 8px;
+    border-radius: 10px;
+    background: linear-gradient(135deg, rgba(0,212,255,0.15), rgba(124,58,237,0.15));
     border: 1px solid var(--stroke-2);
     display: flex; align-items: center; justify-content: center;
-    font-size: 18px; color: var(--accent);
+    font-size: 15px; color: var(--accent);
   }
-  .dz-title { font-weight: 500; text-align: center; }
-  .dz-hint  { text-align: center; color: var(--dim); font-size: 11.5px; margin-top: 4px; letter-spacing: 0.02em; }
+  .dz-title { font-weight: 500; text-align: center; font-size: 13px; }
+  .dz-hint  { text-align: center; color: var(--dim); font-size: 10.5px; margin-top: 3px; letter-spacing: 0.02em; }
   #preview-wrap { display: none; align-items: center; gap: 14px; justify-content: center; }
   #preview-img { height: 56px; border-radius: 8px; border: 1px solid var(--stroke); }
   #preview-name { font-size: 13px; font-weight: 500; }
@@ -202,7 +614,7 @@
 
   /* ─────────── Sidebars ─────────── */
   .sidebar {
-    position: fixed; top: 84px; bottom: 100px;
+    position: fixed; top: 168px; bottom: 110px;
     width: 260px;
     z-index: 20;
     display: flex; flex-direction: column; gap: 12px;
@@ -216,11 +628,16 @@
   .sidebar.hidden.right { transform: translateX( 110%); opacity: 0; }
 
   .sb-section-title {
-    font-size: 10px; font-weight: 600; letter-spacing: 0.14em;
-    text-transform: uppercase; color: var(--dim);
+    font-family: "Unbounded", "Space Grotesk", sans-serif;
+    font-size: 11px; font-weight: 500; letter-spacing: -0.01em;
+    color: var(--text);
     display: flex; justify-content: space-between; align-items: center;
   }
-  .sb-section-title .meta { color: var(--muted); font-weight: 500; letter-spacing: 0.02em; text-transform: none; }
+  .sb-section-title .meta {
+    font-family: "JetBrains Mono", monospace;
+    color: var(--dim); font-weight: 400; font-size: 10px;
+    letter-spacing: 0.04em;
+  }
 
   /* Collapse handles on viewport edges */
   .sb-toggle {
@@ -241,13 +658,74 @@
 
   /* Sidebar card (glass inside sidebar) */
   .sbcard {
-    background: var(--glass-2);
-    backdrop-filter: blur(20px) saturate(140%);
-    -webkit-backdrop-filter: blur(20px) saturate(140%);
-    border: 1px solid var(--stroke);
-    border-radius: 14px; padding: 12px;
-    box-shadow: 0 0 0 1px var(--hairline) inset, 0 20px 40px rgba(0,0,0,0.35);
+    position: relative;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,0.06) 0%, rgba(255,255,255,0.015) 40%, rgba(255,255,255,0.02) 100%),
+      var(--glass-2);
+    backdrop-filter: blur(22px) saturate(150%);
+    -webkit-backdrop-filter: blur(22px) saturate(150%);
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 16px; padding: 14px;
+    box-shadow:
+      0 1px 0 rgba(255,255,255,0.08) inset,
+      0 0 0 1px rgba(0,0,0,0.4),
+      0 16px 40px rgba(0,0,0,0.45),
+      0 2px 6px rgba(0,0,0,0.3);
   }
+  .sbcard::before {
+    content: ""; position: absolute; inset: 0;
+    border-radius: inherit; pointer-events: none;
+    background: linear-gradient(
+      135deg,
+      rgba(255,255,255,0.08) 0%,
+      transparent 30%,
+      transparent 70%,
+      rgba(0,212,255,0.04) 100%
+    );
+  }
+  .sbcard > * { position: relative; }
+
+  /* Right-sidebar cards: compact by default, expand on hover */
+  .sidebar.right .sbcard.collapsible {
+    cursor: pointer;
+    max-height: 118px;
+    overflow: hidden;
+    transition: max-height .4s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .sidebar.right .sbcard.collapsible::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: 0;
+    height: 42px; pointer-events: none;
+    background: linear-gradient(180deg, transparent, rgba(12,12,16,0.95) 90%);
+    border-radius: 0 0 16px 16px;
+    transition: opacity .3s ease;
+  }
+  .sidebar.right .sbcard.collapsible:hover {
+    max-height: 58vh; overflow: hidden; cursor: default;
+    z-index: 3;
+    box-shadow:
+      0 1px 0 rgba(255,255,255,0.1) inset,
+      0 0 0 1px rgba(0,212,255,0.25),
+      0 24px 60px rgba(0,0,0,0.55);
+    border-color: rgba(0,212,255,0.3);
+  }
+  .sidebar.right .sbcard.collapsible:hover::after { opacity: 0; }
+  .sidebar.right .sbcard .sb-inner {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height .4s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .sidebar.right .sbcard.collapsible:hover .sb-inner {
+    max-height: calc(58vh - 70px);
+    overflow-y: auto;
+    padding-right: 2px;
+  }
+  .sidebar.right .sbcard .sb-chev {
+    display: inline-block;
+    font-family: "JetBrains Mono", monospace;
+    color: var(--dim); font-size: 11px;
+    transition: transform .3s;
+  }
+  .sidebar.right .sbcard.collapsible:hover .sb-chev { transform: rotate(90deg); color: var(--accent); }
 
   /* Input thumbnail */
   .input-img-wrap {
@@ -258,20 +736,25 @@
 
   /* Stage thumbs */
   .view-switch {
-    display: flex; gap: 6px; margin-top: 10px;
-    padding: 3px; border-radius: 10px;
+    display: flex; gap: 4px; margin-top: 12px;
+    padding: 4px; border-radius: 12px;
     background: rgba(255,255,255,0.03); border: 1px solid var(--stroke);
   }
   .vs-btn {
     flex: 1; background: transparent; border: none;
+    font-family: "Unbounded", "Space Grotesk", sans-serif;
     color: var(--muted); font-size: 11px; font-weight: 500;
-    padding: 6px 8px; border-radius: 8px; cursor: pointer;
-    transition: .15s; letter-spacing: 0.02em;
+    letter-spacing: -0.01em;
+    padding: 8px 10px; border-radius: 9px; cursor: pointer;
+    transition: .18s;
   }
   .vs-btn:hover:not(:disabled) { color: var(--text); }
   .vs-btn.active {
-    background: rgba(0,212,255,0.08); color: var(--accent);
-    box-shadow: 0 0 0 1px rgba(0,212,255,0.2) inset;
+    background: linear-gradient(135deg, rgba(0,212,255,0.12), rgba(124,58,237,0.08));
+    color: #fff;
+    box-shadow:
+      0 0 0 1px rgba(0,212,255,0.35) inset,
+      0 4px 12px rgba(0,212,255,0.15);
   }
   .vs-btn:disabled { opacity: .4; cursor: not-allowed; }
 
@@ -345,11 +828,43 @@
     margin-top: 10px; padding: 12px 14px; max-height: 240px; overflow-y: auto;
     border-radius: 10px; background: rgba(255,255,255,0.02);
     border: 1px solid var(--stroke);
-    font-family: "Geist Mono", ui-monospace, monospace;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
     font-size: 11px; line-height: 1.65;
     color: var(--muted); white-space: pre-wrap;
   }
   .scene-text .hl { color: var(--accent); }
+
+  /* Understanding panel */
+  .understanding {
+    margin-top: 10px; padding: 12px 14px;
+    min-height: 64px; max-height: 280px; overflow-y: auto;
+    border-radius: 10px;
+    background: rgba(0,212,255,0.03);
+    border: 1px solid rgba(0,212,255,0.12);
+    color: var(--text); font-size: 12.5px; line-height: 1.62;
+  }
+  .understanding .cursor {
+    display: inline-block; width: 7px; height: 14px;
+    background: var(--accent); vertical-align: text-bottom;
+    margin-left: 2px; animation: blink 1s steps(2) infinite;
+    box-shadow: 0 0 6px var(--accent);
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  .verdict {
+    margin-top: 12px; padding: 10px 12px;
+    border-radius: 10px; background: rgba(255,255,255,0.02);
+    border: 1px solid var(--stroke);
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .v-action {
+    font-size: 20px; font-weight: 600; letter-spacing: -0.3px;
+    line-height: 1.1;
+  }
+  .v-conf {
+    font-size: 10.5px; color: var(--dim);
+    font-family: "JetBrains Mono", monospace;
+    letter-spacing: 0.04em;
+  }
 
   /* Placeholder in panels */
   .placeholder {
@@ -359,12 +874,60 @@
 
   /* ─────────── Bottom command bar ─────────── */
   .cmdbar {
-    position: fixed; left: 50%; bottom: 20px;
+    position: fixed; left: 50%; bottom: 24px;
     transform: translateX(-50%);
     z-index: 30;
-    min-width: 640px; max-width: calc(100vw - 40px);
-    padding: 10px 12px;
-    display: flex; align-items: center; gap: 14px;
+    min-width: 720px; max-width: calc(100vw - 40px);
+    padding: 14px 16px;
+    display: flex; align-items: center; gap: 18px;
+    transition: min-width .35s cubic-bezier(0.2,0.8,0.2,1),
+                padding .35s cubic-bezier(0.2,0.8,0.2,1),
+                background .35s;
+  }
+  /* Idle state: cmdbar collapses around a single giant run button */
+  .cmdbar.idle {
+    min-width: 0; padding: 0;
+    background: transparent; border-color: transparent;
+    box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
+    gap: 0;
+  }
+  .cmdbar.idle .mini-timeline,
+  .cmdbar.idle .divider,
+  .cmdbar.idle .cmd-toggle { display: none; }
+  .cmdbar.idle .run-btn {
+    padding: 18px 22px 18px 28px;
+    border-radius: 22px;
+    gap: 16px;
+    box-shadow:
+      0 0 0 1px rgba(0,212,255,0.5),
+      0 0 0 6px rgba(0,212,255,0.08),
+      0 20px 60px rgba(0,212,255,0.38),
+      0 0 100px rgba(0,212,255,0.15);
+    animation: runPulse 2.6s ease-in-out infinite;
+  }
+  .cmdbar.idle .run-btn:hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow:
+      0 0 0 1px rgba(0,212,255,0.7),
+      0 0 0 8px rgba(0,212,255,0.12),
+      0 28px 80px rgba(0,212,255,0.5),
+      0 0 140px rgba(0,212,255,0.2);
+  }
+  .cmdbar.idle .run-btn .rb-eyebrow { font-size: 9.5px; letter-spacing: 0.24em; }
+  .cmdbar.idle .run-btn .rb-title   { font-size: 20px; }
+  .cmdbar.idle .run-btn .rb-arrow   { width: 32px; height: 32px; font-size: 16px; }
+  @keyframes runPulse {
+    0%,100% { box-shadow:
+      0 0 0 1px rgba(0,212,255,0.5),
+      0 0 0 6px rgba(0,212,255,0.08),
+      0 20px 60px rgba(0,212,255,0.38),
+      0 0 100px rgba(0,212,255,0.15); }
+    50%     { box-shadow:
+      0 0 0 1px rgba(0,212,255,0.6),
+      0 0 0 12px rgba(0,212,255,0.04),
+      0 24px 72px rgba(0,212,255,0.45),
+      0 0 120px rgba(0,212,255,0.22); }
+  }
     border-radius: 16px;
     background: var(--glass);
     backdrop-filter: blur(24px) saturate(140%);
@@ -377,60 +940,145 @@
   }
   .cmd-section { display: flex; align-items: center; gap: 8px; }
 
-  /* Mini timeline */
-  .mini-timeline { display: flex; align-items: center; gap: 0; flex: 1; min-width: 0; }
+  /* Mini timeline — bigger, more confident bubbles */
+  .mini-timeline {
+    display: flex; align-items: center; gap: 0;
+    flex: 1; min-width: 0;
+    padding: 4px 6px;
+  }
   .mt-dot {
-    width: 8px; height: 8px; border-radius: 50%;
-    background: rgba(255,255,255,0.08);
+    width: 14px; height: 14px; border-radius: 50%;
+    background: rgba(255,255,255,0.06);
+    border: 1.5px solid rgba(255,255,255,0.1);
     position: relative;
-    transition: all .3s;
+    transition: all .3s cubic-bezier(0.2, 0.8, 0.2, 1);
     flex-shrink: 0;
   }
   .mt-dot.active {
+    width: 16px; height: 16px;
     background: var(--accent);
-    box-shadow: 0 0 0 3px rgba(0,212,255,0.15), 0 0 14px rgba(0,212,255,0.7);
-    animation: breathe 1.6s ease-in-out infinite;
+    border-color: var(--accent);
+    box-shadow:
+      0 0 0 5px rgba(0,212,255,0.12),
+      0 0 0 10px rgba(0,212,255,0.05),
+      0 0 22px rgba(0,212,255,0.75);
+    animation: dotPulse 1.4s ease-in-out infinite;
   }
-  .mt-dot.ok    { background: var(--emerald); box-shadow: 0 0 6px rgba(16,185,129,0.35); }
-  .mt-dot.error { background: var(--danger); }
+  @keyframes dotPulse {
+    0%,100% { box-shadow:
+      0 0 0 5px rgba(0,212,255,0.12),
+      0 0 0 10px rgba(0,212,255,0.05),
+      0 0 22px rgba(0,212,255,0.75); }
+    50%     { box-shadow:
+      0 0 0 7px rgba(0,212,255,0.08),
+      0 0 0 14px rgba(0,212,255,0.03),
+      0 0 28px rgba(0,212,255,0.9); }
+  }
+  .mt-dot.ok {
+    background: var(--emerald);
+    border-color: var(--emerald);
+    box-shadow:
+      0 0 0 3px rgba(16,185,129,0.15),
+      0 0 12px rgba(16,185,129,0.55);
+  }
+  .mt-dot.ok::after {
+    content: "✓"; position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: #000; font-size: 9px; font-weight: 700;
+  }
+  .mt-dot.error { background: var(--danger); border-color: var(--danger); }
   .mt-dot .tip {
-    position: absolute; bottom: calc(100% + 8px); left: 50%;
+    position: absolute; bottom: calc(100% + 10px); left: 50%;
     transform: translateX(-50%);
     background: var(--glass-2); border: 1px solid var(--stroke);
-    padding: 4px 8px; border-radius: 6px;
-    font-size: 10.5px; color: var(--text);
+    padding: 5px 10px; border-radius: 8px;
+    font-family: "Unbounded", "Space Grotesk", sans-serif;
+    font-size: 10.5px; font-weight: 500; color: var(--text);
+    letter-spacing: -0.01em;
     white-space: nowrap;
     opacity: 0; pointer-events: none;
     transition: opacity .15s;
   }
   .mt-dot:hover .tip { opacity: 1; }
-  .mt-line { flex: 1; height: 1px; background: rgba(255,255,255,0.06); }
-  .mt-line.ok { background: linear-gradient(90deg, var(--emerald), var(--emerald)); opacity: 0.4; }
+  .mt-line {
+    flex: 1; height: 2px;
+    background: rgba(255,255,255,0.06);
+    border-radius: 2px;
+    min-width: 8px;
+    overflow: hidden;
+    position: relative;
+  }
+  .mt-line.ok {
+    background: linear-gradient(90deg, var(--emerald), rgba(16,185,129,0.4));
+    box-shadow: 0 0 6px rgba(16,185,129,0.35);
+  }
 
-  /* Run FAB */
+  /* ─── Run button — layered + shimmer + arrow ─── */
   .run-btn {
-    padding: 9px 18px;
-    background: linear-gradient(135deg, var(--accent), #0099cc);
-    color: #00131a; font-weight: 600; font-size: 13px;
-    border: none; border-radius: 12px;
-    cursor: pointer; letter-spacing: 0.01em;
-    display: inline-flex; align-items: center; gap: 8px;
+    position: relative; overflow: hidden;
+    padding: 11px 18px 11px 22px;
+    background: linear-gradient(135deg, #00d4ff 0%, #0099cc 100%);
+    color: #00131a; border: none; cursor: pointer;
+    border-radius: 14px;
+    display: inline-flex; align-items: center; gap: 12px;
     box-shadow:
       0 0 0 1px rgba(0,212,255,0.4),
       0 10px 30px rgba(0,212,255,0.28);
-    transition: all .15s;
+    transition: all .2s;
   }
+  .run-btn::before {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(
+      110deg,
+      transparent 30%,
+      rgba(255,255,255,0.35) 50%,
+      transparent 70%
+    );
+    transform: translateX(-100%);
+    transition: transform .8s cubic-bezier(0.25, 0.8, 0.25, 1);
+    pointer-events: none;
+  }
+  .run-btn:hover::before { transform: translateX(100%); }
   .run-btn:hover:not(:disabled) {
     transform: translateY(-1px);
-    box-shadow: 0 0 0 1px rgba(0,212,255,0.55), 0 16px 40px rgba(0,212,255,0.42);
+    box-shadow: 0 0 0 1px rgba(0,212,255,0.6), 0 16px 40px rgba(0,212,255,0.45);
   }
   .run-btn:disabled { opacity: 0.35; cursor: not-allowed; box-shadow: none; }
+  .run-btn .rb-col {
+    display: flex; flex-direction: column; align-items: flex-start;
+    line-height: 1; position: relative;
+  }
+  .run-btn .rb-eyebrow {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 8.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.22em;
+    color: rgba(0,19,26,0.55);
+    margin-bottom: 3px;
+  }
+  .run-btn .rb-title {
+    font-family: "Unbounded", "Space Grotesk", sans-serif;
+    font-size: 14px; font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1;
+  }
+  .run-btn .rb-arrow {
+    width: 22px; height: 22px; border-radius: 50%;
+    background: rgba(0,19,26,0.18);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700;
+    transition: transform .2s, background .2s;
+  }
+  .run-btn:hover:not(:disabled) .rb-arrow {
+    transform: translateX(3px);
+    background: rgba(0,19,26,0.3);
+  }
   .run-btn .mini-spin {
-    width: 12px; height: 12px; border: 1.5px solid rgba(0,19,26,0.3);
+    width: 14px; height: 14px; border: 2px solid rgba(0,19,26,0.3);
     border-top-color: #00131a; border-radius: 50%;
     animation: spin .7s linear infinite; display: none;
   }
   .run-btn.running .mini-spin { display: block; }
+  .run-btn.running .rb-arrow  { display: none; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
   /* Toggle pills in cmdbar */
@@ -685,7 +1333,7 @@
     padding: 5px 10px; border-radius: 6px;
     background: transparent; border: 1px solid var(--stroke);
     color: var(--muted); font-size: 10.5px; cursor: pointer;
-    font-family: "Geist Mono", monospace;
+    font-family: "JetBrains Mono", monospace;
     white-space: nowrap; transition: .15s;
   }
   .json-tab:hover { color: var(--text); border-color: var(--stroke-2); }
@@ -695,7 +1343,7 @@
   }
   .json-body {
     padding: 14px 18px; max-height: 380px; overflow: auto;
-    font-family: "Geist Mono", monospace; font-size: 11px;
+    font-family: "JetBrains Mono", monospace; font-size: 11px;
     line-height: 1.6; color: var(--muted);
     white-space: pre-wrap; word-break: break-word;
   }
@@ -732,16 +1380,33 @@
 <div class="ambient" id="ambient"></div>
 
 <!-- Top bar -->
-<div class="topbar">
+<div class="topbar" id="topbar">
   <div class="brand">
-    <div class="brand-logo"></div>
-    <span>navsense<small>vision · v0.1</small></span>
+    <img class="brand-logo" src="/media/logo-removebg-preview.png" alt="Navsense" />
   </div>
+
+  <!-- Live now-playing stage display (shows during a run) -->
+  <div class="nowplaying" id="nowplaying">
+    <div class="np-ring"></div>
+    <div class="np-body">
+      <div class="np-step mono" id="np-step">0 / 11</div>
+      <div class="np-title" id="np-title">Awaiting</div>
+    </div>
+    <div class="np-pulse"><span></span><span></span><span></span></div>
+    <div class="np-elapsed mono" id="np-elapsed">0.0s</div>
+  </div>
+
   <div class="spacer"></div>
-  <div class="pill"><span class="sdot"></span><span id="status-text">ready</span></div>
   <button class="icon-btn" id="new-btn" onclick="newImage()" style="display:none;">New image</button>
   <button class="icon-btn danger" id="cancel-btn" onclick="cancelRun()" style="display:none;">Cancel</button>
   <button class="icon-btn" id="json-btn" onclick="toggleDrawer()" style="display:none;">⋯ outputs</button>
+  <button class="icon-btn primary" id="result-btn" onclick="showResult()" style="display:none;">★ Result</button>
+</div>
+
+<!-- Multi-image queue strip (shown only when there's more than one run) -->
+<div class="queue-strip" id="queue-strip">
+  <div class="q-label">Running in parallel</div>
+  <div id="queue-cards" style="display:flex; gap:8px;"></div>
 </div>
 
 <!-- Sidebar toggle handles -->
@@ -751,10 +1416,10 @@
 <!-- Idle hero -->
 <div class="hero" id="hero">
   <div class="hero-card glass">
-    <h1>Navsense</h1>
-    <div class="tagline">Upload a scene. Detection, depth, 3D lift, decision — end-to-end.</div>
+    <h1>Robot vision,<br /><span class="accent">solved</span> end-to-end.</h1>
+    <div class="tagline">Upload any scene. Watch detection, segmentation, depth estimation, 3D lift, and safety decision happen live.</div>
     <div id="drop-zone">
-      <input type="file" id="file-input" accept="image/*" />
+      <input type="file" id="file-input" accept="image/*" multiple />
       <div id="upload-prompt">
         <div class="dz-icon">↑</div>
         <div class="dz-title">Drop an image or click to browse</div>
@@ -768,7 +1433,14 @@
         </div>
       </div>
     </div>
+
   </div>
+</div>
+
+<!-- Feature marquee — continuously scrolls sideways -->
+<div class="feature-marquee" id="feature-marquee">
+  <div class="fm-eyebrow">Under the hood</div>
+  <div class="fm-track" id="fm-track"></div>
 </div>
 
 <!-- Left sidebar -->
@@ -793,19 +1465,43 @@
 
 <!-- Right sidebar -->
 <div class="sidebar right hidden" id="sidebar-right">
-  <div class="sbcard">
+  <div class="sbcard collapsible">
     <div class="sb-section-title">
-      <span>Entities</span>
-      <span class="meta mono" id="entity-count">0</span>
+      <span>Entities <span class="meta mono" id="entity-count" style="margin-left:6px">0</span></span>
+      <span class="sb-chev">›</span>
     </div>
-    <div class="entity-list" id="entity-list">
-      <div class="placeholder">Awaiting detections</div>
+    <div class="sb-inner">
+      <div class="entity-list" id="entity-list">
+        <div class="placeholder">Awaiting detections</div>
+      </div>
     </div>
   </div>
-  <div class="sbcard">
-    <div class="sb-section-title"><span>Scene graph</span></div>
-    <div class="scene-text" id="scene-text">
-      <div class="placeholder">Runs after 3D lift</div>
+
+  <div class="sbcard collapsible">
+    <div class="sb-section-title">
+      <span>Scene graph</span>
+      <span class="sb-chev">›</span>
+    </div>
+    <div class="sb-inner">
+      <div class="scene-text" id="scene-text">
+        <div class="placeholder">Runs after 3D lift</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sbcard collapsible">
+    <div class="sb-section-title">
+      <span>Understanding <span class="meta" id="understanding-status" style="margin-left:6px"></span></span>
+      <span class="sb-chev">›</span>
+    </div>
+    <div class="sb-inner">
+      <div class="understanding" id="understanding">
+        <div class="placeholder">LLM reasoning appears here</div>
+      </div>
+      <div class="verdict" id="sidebar-verdict" style="display:none;">
+        <div class="v-action" id="sidebar-action">—</div>
+        <div class="v-conf"   id="sidebar-conf"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -850,7 +1546,7 @@
 </div>
 
 <!-- Bottom command bar -->
-<div class="cmdbar" id="cmdbar">
+<div class="cmdbar idle" id="cmdbar">
   <div class="cmd-section mini-timeline" id="mini-timeline"></div>
   <div class="divider"></div>
   <div class="cmd-section">
@@ -868,8 +1564,45 @@
   <div class="divider"></div>
   <button class="run-btn" id="run-btn" onclick="run()" disabled>
     <div class="mini-spin"></div>
-    <span id="run-label">Run pipeline</span>
+    <div class="rb-col">
+      <span class="rb-eyebrow" id="rb-eyebrow">Ready when you are</span>
+      <span class="rb-title"   id="run-label">Run the pipeline</span>
+    </div>
+    <div class="rb-arrow">→</div>
   </button>
+</div>
+
+<!-- RESULT REVEAL MODAL -->
+<div class="result-veil" id="result-veil" onclick="if(event.target===this) hideResult()">
+  <div class="result-card">
+    <button class="result-close" onclick="hideResult()" title="Dismiss">×</button>
+    <div class="result-eyebrow"><span class="dot-pulse"></span>Pipeline complete</div>
+    <div class="result-headline serif">The robot should</div>
+    <div class="result-verdict" id="r-verdict">—</div>
+    <div class="result-conf" id="r-conf"></div>
+    <div class="result-reasoning">
+      <span class="rlabel">LLM reasoning</span>
+      <span id="r-reasoning"></span>
+    </div>
+    <div class="result-grid">
+      <div class="result-kpi">
+        <div class="k-label">Objects detected</div>
+        <div class="k-val" id="r-objects">0</div>
+      </div>
+      <div class="result-kpi">
+        <div class="k-label">Run time</div>
+        <div class="k-val" id="r-runtime">—</div>
+      </div>
+    </div>
+    <div class="result-reasoning">
+      <span class="rlabel">Entities</span>
+      <div class="result-entities" id="r-entities"></div>
+    </div>
+    <div class="result-actions">
+      <button class="result-btn" onclick="toggleDrawer(); hideResult();">View JSON outputs</button>
+      <button class="result-btn primary" onclick="hideResult()">Inspect the 3D scene</button>
+    </div>
+  </div>
 </div>
 
 <!-- JSON drawer -->
@@ -897,6 +1630,7 @@ const STAGES = [
   { id:"llm_depth",   name:"LLM depth" },
   { id:"edge_rat",    name:"Edge rat." },
   { id:"fused",       name:"Fused" },
+  { id:"binding",     name:"Bind" },
   { id:"consistency", name:"Sanity" },
   { id:"scene_data",  name:"3D lift" },
   { id:"decision",    name:"Decision" },
@@ -904,9 +1638,17 @@ const STAGES = [
 const THUMB_STAGES = ["raw","gdino","sam2","depth","fused"];
 const $ = id => document.getElementById(id);
 
-let selectedFile = null;
-const rawData = {};
+// ── Multi-image state ──
+let selectedFiles = [];          // pending uploads (before run)
+const runs = [];                 // { id, file, thumbUrl, rawData, stagesCompleted, status, verdict, runtime, controller }
+let activeRun = null;
+let rawData = {};                // always pointed at activeRun.rawData for legacy code paths
 let runController = null;
+let runStart = 0;
+let elapsedTimer = null;
+let stagesCompleted = 0;         // mirrors activeRun.stagesCompleted
+let finalRuntime = 0;
+let runIdSeq = 0;
 
 /* ─── Upload ─────────────────────────────────────────── */
 const dropZone = $("drop-zone"), fileInput = $("file-input");
@@ -914,32 +1656,71 @@ const uploadPmpt = $("upload-prompt"), previewWrp = $("preview-wrap");
 const previewImg = $("preview-img"), previewNm = $("preview-name");
 const runBtn = $("run-btn");
 
-fileInput.addEventListener("change", e => setFile(e.target.files[0]));
+fileInput.addEventListener("change", e => setFiles([...e.target.files]));
 dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("dragover"); });
 dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
 dropZone.addEventListener("drop", e => {
   e.preventDefault(); dropZone.classList.remove("dragover");
-  const f = e.dataTransfer.files[0];
-  if (f && f.type.startsWith("image/")) setFile(f);
+  const files = [...e.dataTransfer.files].filter(f => f.type.startsWith("image/"));
+  if (files.length) setFiles(files);
 });
-function setFile(f) {
-  selectedFile = f;
+function setFiles(files) {
+  selectedFiles = files;
+  if (!files.length) { runBtn.disabled = true; return; }
   const r = new FileReader();
   r.onload = ev => {
     previewImg.src = ev.target.result;
-    previewNm.textContent = f.name;
+    previewNm.textContent = files.length === 1
+      ? files[0].name
+      : `${files.length} images selected`;
     uploadPmpt.style.display = "none";
     previewWrp.style.display = "flex";
   };
-  r.readAsDataURL(f);
+  r.readAsDataURL(files[0]);
   runBtn.disabled = false;
 }
 window.clearImage = function(e) {
   e.stopPropagation();
-  selectedFile = null; fileInput.value = "";
+  selectedFiles = []; fileInput.value = "";
   uploadPmpt.style.display = ""; previewWrp.style.display = "none";
   runBtn.disabled = true;
 };
+
+/* ─── Feature marquee ──────────────────────────────── */
+const FEATURES = [
+  { title: "SOTA Computer Vision",  blurb: "Grounding DINO · SAM 2 · DepthAnything V2" },
+  { title: "Pixel-accurate Masks",  blurb: "SAM 2 per-object segmentation at full resolution" },
+  { title: "LLM-guided Detection",  blurb: "GPT writes the prompt for every image" },
+  { title: "Four-signal Fusion",    blurb: "Depth + size + area + LLM, weighted per object" },
+  { title: "Edge Rationalization",  blurb: "LLM disambiguates clipped-bbox objects" },
+  { title: "Part → Owner Binding",  blurb: "Helmets snap to heads, tires snap to cars" },
+  { title: "3D Scene Graph",        blurb: "Point cloud + spatial edges + blocking flags" },
+  { title: "LLM Sanity Check",      blurb: "Second pass corrects physically-implausible depths" },
+  { title: "Safety-rules Decision", blurb: "SAFETY_RULES.md + LLM critic → STOP / SLOW / CONTINUE" },
+  { title: "Auto-learning Labels",  blurb: "Unknown classes auto-classified and persisted" },
+];
+
+function renderMarquee() {
+  const track = $("fm-track"); if (!track) return;
+  track.innerHTML = "";
+  // Render twice so the animation can loop seamlessly
+  const makeCard = (f, i) => {
+    const card = document.createElement("div");
+    card.className = "fm-card";
+    card.innerHTML = `
+      <div class="fm-num">${String((i % FEATURES.length) + 1).padStart(2, "0")}</div>
+      <div class="fm-col">
+        <div class="fm-title">${f.title}</div>
+        <div class="fm-blurb">${f.blurb}</div>
+      </div>`;
+    return card;
+  };
+  FEATURES.forEach((f, i) => track.appendChild(makeCard(f, i)));
+  FEATURES.forEach((f, i) => track.appendChild(makeCard(f, i)));
+}
+document.addEventListener("DOMContentLoaded", renderMarquee);
+if (document.readyState !== "loading") renderMarquee();
+
 document.querySelectorAll(".cmd-toggle").forEach(t => {
   t.addEventListener("click", e => {
     e.preventDefault();
@@ -1469,25 +2250,47 @@ function highlightNode(id) {
 }
 
 /* ─── Decision ───────────────────────────────────────── */
+let typewriterTimer = null;
+function typewriteInto(el, text, cps = 42) {
+  if (typewriterTimer) clearInterval(typewriterTimer);
+  el.innerHTML = '<span class="twtext"></span><span class="cursor"></span>';
+  const target = el.querySelector(".twtext");
+  const cur = el.querySelector(".cursor");
+  const chars = Array.from(text || "");
+  let i = 0;
+  const interval = Math.max(8, Math.floor(1000 / cps));
+  typewriterTimer = setInterval(() => {
+    if (i >= chars.length) {
+      clearInterval(typewriterTimer);
+      typewriterTimer = setTimeout(() => cur.remove(), 1200);
+      return;
+    }
+    target.textContent += chars[i++];
+    el.scrollTop = el.scrollHeight;
+  }, interval);
+}
+
 function showDecision(ev) {
-  // Decision sits where the stage badge was — hide it to avoid overlap
+  // Hide the old top-toast; also hide the transient stage badge
+  $("decision")?.classList.remove("on");
   $("stage-badge").classList.remove("on");
-  const el = $("decision");
-  const big = $("decision-big");
-  big.textContent = ev.label;
-  big.style.color = ev.color;
-  el.style.boxShadow = `0 0 0 1px ${ev.color}33 inset, 0 0 0 1px ${ev.color}22, 0 30px 60px rgba(0,0,0,0.55), 0 0 80px ${ev.color}22`;
-  const conf = $("decision-conf");
-  if (typeof ev.confidence === "number") {
-    conf.textContent = `· confidence ${(ev.confidence*100|0)}%`;
-  } else {
-    conf.textContent = "";
-  }
-  const ul = $("decision-reasons"); ul.innerHTML = "";
-  for (const r of (ev.reasons || [])) {
-    const li = document.createElement("li"); li.textContent = r; ul.appendChild(li);
-  }
-  requestAnimationFrame(() => el.classList.add("on"));
+
+  // Sidebar verdict (small gray)
+  const v = $("sidebar-verdict");
+  const action = $("sidebar-action");
+  const confEl = $("sidebar-conf");
+  action.textContent = ev.label || "—";
+  action.style.color = ev.color || "var(--text)";
+  action.style.textShadow = ev.color ? `0 0 16px ${ev.color}55` : "";
+  confEl.textContent = (typeof ev.confidence === "number")
+    ? `confidence ${(ev.confidence * 100) | 0}%`
+    : "";
+  v.style.display = "flex";
+
+  // Typewriter the reasoning into the Understanding panel
+  const reasoning = (ev.reasons && ev.reasons[0]) || "Scene assessed. No further reasoning provided.";
+  $("understanding-status").textContent = "live";
+  typewriteInto($("understanding"), reasoning, 46);
 }
 
 /* ─── JSON drawer ────────────────────────────────────── */
@@ -1532,16 +2335,15 @@ window.toggleSidebar = function(side) {
   else                  btn.textContent = collapsed ? "‹" : "›";
 };
 
-/* ─── Run / Cancel / New ─────────────────────────────── */
-window.run = async function() {
-  if (!selectedFile) return;
+/* ─── Queue orchestration ─────────────────────────────── */
 
-  // Reset
+function resetUiState() {
   $("compositor").querySelectorAll("img.comp-layer").forEach(l => l.remove());
   $("decision").classList.remove("on");
+  $("result-veil").classList.remove("on");
+  $("result-btn").style.display = "none";
   for (const s of STAGES) setStageStatus(s.id, "idle");
   document.querySelectorAll(".mt-line").forEach(l => l.classList.remove("ok"));
-  for (const k in rawData) delete rawData[k];
   $("json-body").textContent = "—";
   $("json-tabs").innerHTML = "";
   $("json-btn").style.display = "none";
@@ -1553,34 +2355,119 @@ window.run = async function() {
   $("entity-list").innerHTML = `<div class="placeholder">Awaiting detections</div>`;
   $("entity-count").textContent = "0";
   $("scene-text").innerHTML = `<div class="placeholder">Analyzing…</div>`;
+  $("understanding").innerHTML = `<div class="placeholder">Reasoning will type out when the decision completes</div>`;
+  $("sidebar-verdict").style.display = "none";
+  $("understanding-status").textContent = "";
+  if (typewriterTimer) { clearInterval(typewriterTimer); clearTimeout(typewriterTimer); }
   nodeObjects = []; hidePopover();
   if (scene) while (scene.children.length) scene.remove(scene.children[0]);
+  $("topbar").style.setProperty("--progress", "0%");
+}
 
-  // Switch UI
-  $("hero").classList.add("gone");
-  $("sidebar-left").classList.remove("hidden");
-  $("sidebar-right").classList.remove("hidden");
-  $("sbt-l").textContent = "‹"; $("sbt-r").textContent = "›";
-  $("left-original").src = URL.createObjectURL(selectedFile);
+function renderQueue() {
+  const strip = $("queue-strip");
+  const host  = $("queue-cards");
+  host.innerHTML = "";
+  if (runs.length <= 1) { strip.classList.remove("on"); return; }
+  strip.classList.add("on");
+  runs.forEach((r, i) => {
+    const card = document.createElement("div");
+    card.className = "q-card " + (r.status || "") + (r === activeRun ? " active" : "");
+    card.dataset.id = r.id;
+    const pct = Math.min(100, Math.round((r.stagesCompleted / STAGES.length) * 100));
+    const verdictColor = r.verdict?.color || "#fff";
+    card.innerHTML = `
+      <img src="${r.thumbUrl}" />
+      <div class="q-num">${String(i + 1).padStart(2, "0")}</div>
+      <div class="q-spin"></div>
+      <div class="q-progress" style="width:${pct}%"></div>
+      ${r.verdict
+        ? `<div class="q-verdict" style="color:${verdictColor}">
+             <span class="v-dot"></span>${r.verdict.label}
+           </div>`
+        : ""}`;
+    card.addEventListener("click", () => setActiveRun(r));
+    host.appendChild(card);
+  });
+}
+
+function updateQueueCard(run) {
+  const card = $("queue-cards")?.querySelector(`.q-card[data-id="${run.id}"]`);
+  if (!card) return;
+  card.classList.remove("idle", "running", "done", "error");
+  card.classList.add(run.status || "idle");
+  card.classList.toggle("active", run === activeRun);
+  const pct = Math.min(100, Math.round((run.stagesCompleted / STAGES.length) * 100));
+  const bar = card.querySelector(".q-progress");
+  if (bar) bar.style.width = pct + "%";
+  if (run.verdict && !card.querySelector(".q-verdict")) {
+    const v = document.createElement("div");
+    v.className = "q-verdict";
+    v.style.color = run.verdict.color || "#fff";
+    v.innerHTML = `<span class="v-dot"></span>${run.verdict.label}`;
+    card.appendChild(v);
+  }
+}
+
+function setActiveRun(run) {
+  if (!run || run === activeRun) return;
+  activeRun = run;
+  rawData = run.rawData;
+  stagesCompleted = run.stagesCompleted || 0;
+  renderQueue();
+  replayRun(run);
+}
+
+// Replay a run's stored events into the main DOM/3D/sidebar.
+function replayRun(run) {
+  resetUiState();
+  $("left-original").src = run.thumbUrl;
   showStagesView();
   $("stage-badge").classList.add("on");
-  $("scan-line").classList.add("on");
+  // Walk stage order so image layers come in correct sequence
+  for (const s of STAGES) {
+    const ev = run.rawData[s.id];
+    if (!ev) continue;
+    setStageStatus(s.id, ev.status);
+    if (ev.status !== "ok") continue;
+    if (ev.image) {
+      addLayer(ev.stage, ev.image);
+      if (THUMB_STAGES.includes(ev.stage)) addThumb(ev.stage, ev.image);
+      setActiveThumb(ev.stage);
+    }
+    if (ev.meta && Array.isArray(ev.meta.detections)) renderEntities(ev.meta.detections);
+    if (ev.stage === "scene_data") {
+      $("vs-3d").disabled = false;
+      show3D();
+      buildPointCloud(ev).catch(e => console.error(e));
+      if (ev.text) renderSceneText(ev.text);
+    }
+    if (ev.stage === "decision") {
+      showDecision(ev);
+      finalRuntime = run.runtime || 0;
+      populateResult(ev);
+    }
+  }
+  $("topbar").style.setProperty("--progress",
+    Math.round((run.stagesCompleted / STAGES.length) * 100) + "%");
+  $("np-step").textContent = `${run.stagesCompleted} / ${STAGES.length}`;
+  $("np-title").textContent = run.status === "done" ? "Complete"
+                         : run.status === "error" ? "Error" : "Running";
+}
 
-  runBtn.disabled = true;
-  runBtn.classList.add("running");
-  $("run-label").textContent = "Running";
-  $("status-text").textContent = "processing";
-  $("cancel-btn").style.display = "inline-flex";
-  $("new-btn").style.display = "inline-flex";
+async function processRun(run) {
+  run.status = "running";
+  updateQueueCard(run);
+  run.controller = new AbortController();
+  if (run === activeRun) runController = run.controller;
 
-  runController = new AbortController();
   const form = new FormData();
-  form.append("image", selectedFile);
+  form.append("image", run.file);
   form.append("use_gdino", $("tg-gdino").querySelector("input").checked ? "true" : "false");
   form.append("use_sam",   $("tg-sam").querySelector("input").checked   ? "true" : "false");
 
   try {
-    const resp = await fetch("/run_full", { method: "POST", body: form, signal: runController.signal });
+    const resp = await fetch("/run_full", { method: "POST", body: form, signal: run.controller.signal });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
@@ -1594,35 +2481,123 @@ window.run = async function() {
         const line = buf.slice(0, idx).trim();
         buf = buf.slice(idx + 1);
         if (!line) continue;
-        try { handleEvent(JSON.parse(line)); } catch(e) { console.warn("bad", line); }
+        try { handleEvent(run, JSON.parse(line)); } catch(e) { console.warn("bad", line); }
       }
     }
+    run.status = "done";
+    run.runtime = (performance.now() - run.startedAt) / 1000;
   } catch (err) {
-    if (err.name === "AbortError") {
-      $("stage-badge-text").textContent = "CANCELLED";
-      $("status-text").textContent = "cancelled";
-    } else {
-      console.error(err); $("stage-badge-text").textContent = "ERROR";
-    }
+    if (err.name === "AbortError") run.status = "cancelled";
+    else { run.status = "error"; console.error(err); }
   } finally {
-    runController = null;
-    runBtn.disabled = !selectedFile;
-    runBtn.classList.remove("running");
-    $("run-label").textContent = "Run again";
-    $("status-text").textContent = $("status-text").textContent === "cancelled" ? "cancelled" : "ready";
-    $("scan-line").classList.remove("on");
-    $("cancel-btn").style.display = "none";
-    renderJsonTabs();
+    updateQueueCard(run);
+    run.controller = null;
+    if (run === activeRun) runController = null;
   }
+}
+
+window.run = async function() {
+  if (!selectedFiles.length) return;
+
+  // Build runs
+  runs.splice(0);
+  for (const f of selectedFiles) {
+    runs.push({
+      id: "r" + (++runIdSeq),
+      file: f,
+      thumbUrl: URL.createObjectURL(f),
+      rawData: {},
+      stagesCompleted: 0,
+      status: "idle",
+      verdict: null,
+      runtime: 0,
+      startedAt: 0,
+      controller: null,
+    });
+  }
+  activeRun = runs[0];
+  rawData = activeRun.rawData;
+
+  resetUiState();
+
+  // Switch UI into running layout
+  $("hero").classList.add("gone");
+  $("feature-marquee")?.classList.add("gone");
+  $("cmdbar")?.classList.remove("idle");
+  $("topbar")?.classList.add("minimal");
+  $("sidebar-left").classList.remove("hidden");
+  $("sidebar-right").classList.remove("hidden");
+  $("sbt-l").textContent = "‹"; $("sbt-r").textContent = "›";
+  $("left-original").src = activeRun.thumbUrl;
+  showStagesView();
+  $("stage-badge").classList.add("on");
+  $("scan-line").classList.add("on");
+
+  runBtn.disabled = true;
+  runBtn.classList.add("running");
+  $("run-label").textContent = "Running";
+  $("rb-eyebrow").textContent = runs.length > 1
+    ? `${runs.length} images in parallel`
+    : "In progress";
+  $("cancel-btn").style.display = "inline-flex";
+  $("new-btn").style.display = "inline-flex";
+  $("result-btn").style.display = "none";
+
+  $("topbar").classList.add("running");
+  $("nowplaying").classList.add("on");
+  $("np-step").textContent = `0 / ${STAGES.length}`;
+  $("np-title").textContent = "Initializing";
+  runStart = performance.now();
+  if (elapsedTimer) clearInterval(elapsedTimer);
+  elapsedTimer = setInterval(() => {
+    const s = (performance.now() - runStart) / 1000;
+    $("np-elapsed").textContent = `${s.toFixed(1)}s`;
+  }, 100);
+
+  renderQueue();
+
+  // Kick off runs in parallel
+  for (const r of runs) r.startedAt = performance.now();
+  await Promise.all(runs.map(r => processRun(r)));
+
+  // Teardown
+  runBtn.disabled = !selectedFiles.length;
+  runBtn.classList.remove("running");
+  $("run-label").textContent = "Run again";
+  if ($("rb-eyebrow").textContent.startsWith("In progress") ||
+      $("rb-eyebrow").textContent.includes("images"))
+    $("rb-eyebrow").textContent = "All done";
+  $("scan-line").classList.remove("on");
+  $("cancel-btn").style.display = "none";
+  $("topbar").classList.remove("running");
+  $("nowplaying").classList.remove("on");
+  if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+  renderJsonTabs();
 };
 
 window.cancelRun = function() {
-  if (runController) runController.abort();
+  // Cancel all in-flight runs
+  for (const r of runs) if (r.controller) r.controller.abort();
 };
 window.newImage = function() {
-  if (runController) runController.abort();
+  for (const r of runs) if (r.controller) r.controller.abort();
+  runs.splice(0);
+  activeRun = null;
+  $("queue-strip").classList.remove("on");
+  $("queue-cards").innerHTML = "";
   $("compositor").querySelectorAll("img.comp-layer").forEach(l => l.remove());
   $("decision").classList.remove("on");
+  $("result-veil").classList.remove("on");
+  $("result-btn").style.display = "none";
+  $("topbar").classList.remove("running");
+  $("nowplaying").classList.remove("on");
+  $("topbar").style.setProperty("--progress", "0%");
+  $("understanding").innerHTML = `<div class="placeholder">LLM reasoning appears here</div>`;
+  $("sidebar-verdict").style.display = "none";
+  $("understanding-status").textContent = "";
+  stagesCompleted = 0; finalRuntime = 0;
+  if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+  if (typewriterTimer) { clearInterval(typewriterTimer); clearTimeout(typewriterTimer); }
   for (const s of STAGES) setStageStatus(s.id, "idle");
   document.querySelectorAll(".mt-line").forEach(l => l.classList.remove("ok"));
   for (const k in rawData) delete rawData[k];
@@ -1638,9 +2613,12 @@ window.newImage = function() {
   $("stage-badge").classList.remove("on");
   if (scene) while (scene.children.length) scene.remove(scene.children[0]);
   nodeObjects = []; hidePopover();
-  selectedFile = null; fileInput.value = "";
+  selectedFiles = []; fileInput.value = "";
   uploadPmpt.style.display = ""; previewWrp.style.display = "none";
   $("hero").classList.remove("gone");
+  $("feature-marquee")?.classList.remove("gone");
+  $("cmdbar")?.classList.add("idle");
+  $("topbar")?.classList.remove("minimal");
   $("ambient").classList.remove("dim");
   $("sidebar-left").classList.add("hidden");
   $("sidebar-right").classList.add("hidden");
@@ -1648,45 +2626,123 @@ window.newImage = function() {
   $("cancel-btn").style.display = "none";
   $("compositor").classList.remove("on");
   runBtn.disabled = true;
-  $("run-label").textContent = "Run pipeline";
-  $("status-text").textContent = "ready";
+  $("run-label").textContent = "Run the pipeline";
+  $("rb-eyebrow").textContent = "Ready when you are";
 };
 
-function handleEvent(ev) {
-  rawData[ev.stage] = ev;
-  setStageStatus(ev.stage, ev.status);
+function updateNowPlaying(stageId, title, status) {
+  const idx = STAGES.findIndex(s => s.id === stageId);
+  if (idx < 0) return;
+  $("np-step").textContent = `${idx + 1} / ${STAGES.length}`;
+  $("np-title").textContent = title || stageId;
+  const pct = Math.round((stagesCompleted / STAGES.length) * 100);
+  $("topbar").style.setProperty("--progress", pct + "%");
+}
+
+function handleEvent(run, ev) {
+  run.rawData[ev.stage] = ev;
+  const isActive = (run === activeRun);
 
   if (ev.status === "running") {
-    $("stage-badge-text").textContent = (ev.title || ev.stage).toUpperCase();
+    if (isActive) {
+      setStageStatus(ev.stage, ev.status);
+      $("stage-badge-text").textContent = (ev.title || ev.stage).toUpperCase();
+      updateNowPlaying(ev.stage, ev.title, "running");
+    }
     return;
   }
   if (ev.status === "error") {
+    if (isActive) setStageStatus(ev.stage, ev.status);
     return;
   }
 
-  $("stage-badge-text").textContent = (ev.title || ev.stage).toUpperCase();
+  if (ev.stage !== "done") run.stagesCompleted++;
+  updateQueueCard(run);
 
-  if (ev.stage === "raw" && ev.meta) {
-    $("input-dims").textContent = `${ev.meta.width}×${ev.meta.height}`;
+  if (isActive) {
+    setStageStatus(ev.stage, ev.status);
+    stagesCompleted = run.stagesCompleted;
+    updateNowPlaying(ev.stage, ev.title, "ok");
+    $("stage-badge-text").textContent = (ev.title || ev.stage).toUpperCase();
+
+    if (ev.stage === "raw" && ev.meta) {
+      $("input-dims").textContent = `${ev.meta.width}×${ev.meta.height}`;
+    }
+    if (ev.image) {
+      addLayer(ev.stage, ev.image);
+      if (THUMB_STAGES.includes(ev.stage)) addThumb(ev.stage, ev.image);
+      setActiveThumb(ev.stage);
+    }
+    if (ev.meta && Array.isArray(ev.meta.detections)) renderEntities(ev.meta.detections);
+    if (ev.stage === "scene_data") {
+      $("vs-3d").disabled = false;
+      show3D();
+      buildPointCloud(ev).catch(e => console.error(e));
+      if (ev.text) renderSceneText(ev.text);
+    }
+    if (ev.stage === "decision") {
+      showDecision(ev);
+      finalRuntime = (performance.now() - run.startedAt) / 1000;
+      run.runtime = finalRuntime;
+      populateResult(ev);
+      // Only auto-open the Result modal for single-image runs;
+      // in multi-run mode, the user can open it via the ★ Result button
+      if (runs.length === 1) showResult();
+      else $("result-btn").style.display = "inline-flex";
+    }
+    if (ev.stage === "done") {
+      $("topbar").style.setProperty("--progress", "100%");
+    }
   }
-  if (ev.image) {
-    addLayer(ev.stage, ev.image);
-    if (THUMB_STAGES.includes(ev.stage)) addThumb(ev.stage, ev.image);
-    setActiveThumb(ev.stage);
-  }
-  if (ev.meta && Array.isArray(ev.meta.detections)) {
-    renderEntities(ev.meta.detections);
-  }
-  if (ev.stage === "scene_data") {
-    $("vs-3d").disabled = false;
-    show3D();
-    buildPointCloud(ev).catch(e => console.error(e));
-    if (ev.text) renderSceneText(ev.text);
-  }
+
+  // Capture verdict on the run regardless of active
   if (ev.stage === "decision") {
-    showDecision(ev);
+    run.verdict = { label: ev.label, color: ev.color, confidence: ev.confidence };
+    updateQueueCard(run);
   }
 }
+
+function populateResult(ev) {
+  $("r-verdict").textContent = ev.label || "—";
+  $("r-verdict").style.setProperty("--verdict-color", ev.color || "#00d4ff");
+  $("r-conf").innerHTML = (typeof ev.confidence === "number")
+    ? `Confidence <b>${(ev.confidence * 100) | 0}%</b>`
+    : "";
+  const reasoning = (ev.reasons && ev.reasons[0]) || "Scene assessed.";
+  $("r-reasoning").textContent = reasoning;
+  $("r-runtime").innerHTML = `${finalRuntime.toFixed(1)}<small>s</small>`;
+
+  const dets = (rawData.fused?.meta?.detections)
+            || (rawData.gdino?.meta?.detections)
+            || [];
+  $("r-objects").textContent = dets.length;
+  const chips = $("r-entities"); chips.innerHTML = "";
+  if (!dets.length) {
+    chips.innerHTML = `<span style="color: var(--dim); font-size: 12px;">No objects detected.</span>`;
+  } else {
+    const seen = new Map();
+    for (const d of dets) {
+      const key = d.label || "object";
+      seen.set(key, (seen.get(key) || 0) + 1);
+    }
+    for (const [label, count] of seen) {
+      const colorKey = dets.find(d => d.label === label)?.risk_group;
+      const color = (GROUP_COLORS[colorKey]) || "#94a3b8";
+      const chip = document.createElement("span");
+      chip.className = "r-chip";
+      chip.innerHTML = `<span class="r-dot" style="background:${color};box-shadow:0 0 6px ${color}"></span>${label}${count > 1 ? ` ×${count}` : ""}`;
+      chips.appendChild(chip);
+    }
+  }
+}
+
+window.showResult = function() {
+  $("result-veil").classList.add("on");
+  $("result-btn").style.display = "inline-flex";
+};
+window.hideResult = function() {
+  $("result-veil").classList.remove("on");
+};
 </script>
 </body>
 </html>

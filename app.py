@@ -40,6 +40,11 @@ MAX_W = 960         # cap width of the stage images streamed to browser
 POINTCLOUD_W = 300  # target width of the point cloud grid
 FOCAL_SCALE = 0.8   # matches lift_3d.py
 
+# Toggle: route Grounding DINO + DepthAnything to HF Inference API for speed.
+# Set USE_HF_API=1 in the environment and HF_TOKEN=hf_... to enable.
+import os as _os
+USE_HF_API = _os.environ.get("USE_HF_API", "").lower() in ("1", "true", "yes")
+
 
 # ── lazy model cache ──────────────────────────────────────────────────────────
 
@@ -194,6 +199,103 @@ def _get_openai_client():
     return _cache["openai"]
 
 
+WEARABLE_HINTS = (
+    "helmet", "hard hat", "hardhat", "cap", "hat", "beanie", "headband",
+    "vest", "hi-vis", "hi vis", "safety vest", "reflective vest",
+    "gloves", "glove", "boots", "boot", "shoes", "sneakers", "footwear",
+    "mask", "face mask", "goggles", "glasses", "sunglasses",
+    "bag", "backpack", "handbag",
+    "head", "face", "hand", "arm", "leg", "foot", "torso", "body",
+    "jacket", "shirt", "coat", "uniform", "hair", "hairnet", "ear",
+    "safety harness", "harness",
+)
+
+VEHICLE_PART_HINTS = (
+    "wheel", "tire", "tyre", "headlight", "taillight", "tail light",
+    "mirror", "side mirror", "rearview mirror",
+    "windshield", "window", "bumper", "door", "license plate",
+    "fender", "grille", "roof rack", "exhaust",
+)
+
+
+def _bbox_containment(outer, inner) -> float:
+    """Fraction of inner bbox area that lies inside outer bbox."""
+    ox1, oy1, ox2, oy2 = outer
+    ix1, iy1, ix2, iy2 = inner
+    x1 = max(ox1, ix1); y1 = max(oy1, iy1)
+    x2 = min(ox2, ix2); y2 = min(oy2, iy2)
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    inter = (x2 - x1) * (y2 - y1)
+    inner_area = max(1e-6, (ix2 - ix1) * (iy2 - iy1))
+    return inter / inner_area
+
+
+def _snap_parts_to_owners(detections: list[dict]) -> list[dict]:
+    """
+    Deterministic part→anchor binding.
+
+    For every detection whose label matches a known WEARABLE or VEHICLE_PART,
+    find the HUMAN / VEHICLE detection whose 2D bbox most contains it
+    (≥ 50% of the part's area inside the anchor's bbox) and snap the part's
+    depth_score (and proximity_label) to the anchor's.
+
+    Returns the list of snaps applied (for the UI).
+    """
+    from depth_module.fused_depth import proximity_label as _prox
+
+    humans   = [(i, d) for i, d in enumerate(detections)
+                if d.get("risk_group") == "HUMAN"]
+    vehicles = [(i, d) for i, d in enumerate(detections)
+                if d.get("risk_group") == "VEHICLE"]
+
+    snaps: list[dict] = []
+    for i, d in enumerate(detections):
+        label = (d.get("label") or "").lower()
+        grp   = d.get("risk_group", "")
+        if grp in ("HUMAN", "VEHICLE"):
+            continue
+
+        candidates = None
+        if any(h in label for h in WEARABLE_HINTS):
+            candidates = humans
+        elif any(h in label for h in VEHICLE_PART_HINTS):
+            candidates = vehicles
+        if not candidates:
+            continue
+
+        best_j, best_a, best_frac = None, None, 0.0
+        for j, a in candidates:
+            if j == i:
+                continue
+            frac = _bbox_containment(a["box"], d["box"])
+            if frac > best_frac:
+                best_frac, best_j, best_a = frac, j, a
+        if best_a is None or best_frac < 0.5:
+            continue
+
+        anchor_depth = best_a.get("depth_score")
+        if anchor_depth is None:
+            continue
+        old_depth = d.get("depth_score", 0.5)
+        d["depth_score_original"] = old_depth
+        d["depth_score"]          = anchor_depth
+        d["snapped_to"]           = best_a.get("label")
+        d["snapped_overlap"]      = round(best_frac, 3)
+        try:
+            d["proximity_label"] = _prox(anchor_depth)
+        except Exception:
+            pass
+        snaps.append({
+            "id": i, "label": d.get("label"),
+            "anchor_id": best_j, "anchor_label": best_a.get("label"),
+            "overlap": round(best_frac, 2),
+            "old_depth": round(float(old_depth or 0.5), 3),
+            "new_depth": round(float(anchor_depth), 3),
+        })
+    return snaps
+
+
 def _llm_consistency_check(client, enriched: list[dict]) -> list[dict]:
     """
     Ask GPT-4o-mini whether any objects' depth estimates are inconsistent
@@ -331,6 +433,7 @@ def _make_decision(enriched: list[dict]) -> dict:
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/media",  StaticFiles(directory="ui_media"), name="media")
 
 
 @app.get("/")
@@ -352,6 +455,13 @@ class _SafeEncoder(json.JSONEncoder):
 def _event(stage: str, status: str, **kw) -> bytes:
     return (json.dumps({"stage": stage, "status": status, **kw},
                        cls=_SafeEncoder) + "\n").encode()
+
+
+# Serialize heavy model inference across concurrent requests so parallel
+# multi-image runs don't corrupt global model state. Requests queue, the UI
+# still displays them all as "in progress" via their own streams.
+import asyncio as _asyncio
+_INFERENCE_LOCK = _asyncio.Semaphore(1)
 
 
 @app.post("/run_full")
@@ -404,16 +514,21 @@ async def run_full(
         # 3. Grounding DINO ----------------------------------------------------
         gdino_dets: list[dict] = []
         if want_gdino:
+            source = "HF API" if USE_HF_API else "local"
             yield _event("gdino", "running", title="Grounding DINO",
-                         message="Open-vocabulary detection from LLM prompt...")
+                         message=f"Open-vocabulary detection ({source})...")
             try:
-                from segment_module.grounding_dino import detect as gdino_detect
-                gdino = _get_gdino()
-                gdino_dets = gdino_detect(
-                    gdino, pil, llm_prompt,
-                    score_threshold=0.30,
-                    learn_client=llm_client_shared,
-                )
+                if USE_HF_API:
+                    from hf_inference import detect_hf
+                    gdino_dets = detect_hf(pil, llm_prompt, score_threshold=0.30)
+                else:
+                    from segment_module.grounding_dino import detect as gdino_detect
+                    gdino = _get_gdino()
+                    gdino_dets = gdino_detect(
+                        gdino, pil, llm_prompt,
+                        score_threshold=0.30,
+                        learn_client=llm_client_shared,
+                    )
                 img = _draw_detections_on(base_bgr, gdino_dets)
                 yield _event("gdino", "ok", title="Grounding DINO",
                              image=_bgr_to_b64(img),
@@ -483,12 +598,17 @@ async def run_full(
                              message=f"{type(e).__name__}: {e}")
 
         # 6. DepthAnything -----------------------------------------------------
+        source = "HF API" if USE_HF_API else "local"
         yield _event("depth", "running", title="Depth Anything V2",
-                     message="Running depth estimation...")
+                     message=f"Running depth estimation ({source})...")
         depth_norm = None
         try:
-            pipe = _get_depth_pipe()
-            raw_depth = np.array(pipe(pil)["depth"], dtype=np.float32)
+            if USE_HF_API:
+                from hf_inference import depth_hf
+                raw_depth = depth_hf(pil)
+            else:
+                pipe = _get_depth_pipe()
+                raw_depth = np.array(pipe(pil)["depth"], dtype=np.float32)
             if raw_depth.shape != (H, W):
                 raw_depth = cv2.resize(raw_depth, (W, H))
             d_min, d_max = raw_depth.min(), raw_depth.max()
@@ -582,6 +702,24 @@ async def run_full(
             except Exception as e:
                 traceback.print_exc()
                 yield _event("fused", "error", title="Fused depth",
+                             message=f"{type(e).__name__}: {e}")
+
+        # 9.5 Deterministic part → owner binding ------------------------------
+        # Snap helmets/vests/hats/body parts to their containing HUMAN; snap
+        # wheels/mirrors/headlights to their containing VEHICLE. Runs BEFORE
+        # the LLM sanity pass so the easy cases never burn an LLM call.
+        if enriched:
+            yield _event("binding", "running", title="Part → owner binding",
+                         message="Snapping wearables and parts to their anchors...")
+            try:
+                snaps = _snap_parts_to_owners(enriched)
+                yield _event("binding", "ok", title="Part → owner binding",
+                             text=(f"{len(snaps)} part(s) snapped to owners"
+                                   if snaps else "No part/owner pairs found"),
+                             meta={"snaps": snaps})
+            except Exception as e:
+                traceback.print_exc()
+                yield _event("binding", "error", title="Part → owner binding",
                              message=f"{type(e).__name__}: {e}")
 
         # 10. LLM consistency loop --------------------------------------------
@@ -820,7 +958,12 @@ async def run_full(
 
         yield _event("done", "ok")
 
-    return StreamingResponse(gen(), media_type="application/x-ndjson")
+    async def serialized_gen():
+        async with _INFERENCE_LOCK:
+            for chunk in gen():
+                yield chunk
+
+    return StreamingResponse(serialized_gen(), media_type="application/x-ndjson")
 
 
 if __name__ == "__main__":
