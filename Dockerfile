@@ -10,7 +10,7 @@
 # Build:   docker build -t ethackers-train .
 #
 # Run on Northflank/CoreWeave (GPU Job):
-#   docker run --gpus all -e OPENAI_API_KEY="sk-..." \
+#   docker run --gpus all -e ANTHROPIC_API_KEY="sk-ant-..." \
 #     -v $DATA:/data -v $OUTPUT:/output \
 #     ethackers-train \
 #     python scripts/generate_training_data.py \
@@ -55,7 +55,7 @@ RUN pip install --no-cache-dir \
 # All other deps
 RUN pip install --no-cache-dir \
     numpy scipy scikit-learn joblib \
-    openai tqdm psutil \
+    anthropic pyyaml openai tqdm psutil \
     pillow opencv-python-headless pycocotools \
     ultralytics matplotlib
 

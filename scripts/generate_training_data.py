@@ -20,7 +20,7 @@ After the Job finishes:
   3. Train:  python scripts/train_action_model.py --det-dir /output/detections
 
 Environment variables:
-    OPENAI_API_KEY — required for LLM prompt generation.
+    ANTHROPIC_API_KEY — required for LLM prompt generation (Claude API).
 """
 
 import argparse
