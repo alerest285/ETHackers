@@ -397,7 +397,7 @@ The architecture is done. The hard part — getting all of this designed and wir
 
 - **Depth Anything makes mistakes on weird industrial objects.** The 4-signal fusion helps, but expect occasional wrong proximity estimates.
 - **The multimodal encoder is untrained.** LLMs are doing the heavy lifting for decisions right now.
-- **CPU is slow.** ~60–90s per image end-to-end. On a GPU it's seconds.
+- **CPU is slow.** ~10–15s per image end-to-end. On a GPU we expect this to drastically fall, and would anyways use NavSense for high-level control only.
 - **This is baseline performance with zero fine-tuning.** We used every pretrained model as-is. What you're seeing is the floor, not the ceiling.
 
 ---
