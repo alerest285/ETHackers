@@ -1,26 +1,52 @@
 # ===========================================================================
-# CPU-only training image — trains the GraphClassifier on pre-computed JSONs.
+# Training image — two entrypoints, one container.
 #
-# No torch, no transformers, no CUDA. Just numpy + scikit-learn fitting on
-# the enriched detection + scene graph JSONs that the pipeline already produced.
+# 1. Generate training data (GPU):
+#      python scripts/generate_training_data.py --fast --n 500
 #
-# Image size: ~200 MB.  Training time: seconds.
+# 2. Train classifier (CPU):
+#      python scripts/train_action_model.py --det-dir /output/detections
 #
 # Build:   docker build -t ethackers-train .
-# Run:     docker run -v /path/to/pipeline_output:/data ethackers-train
+#
+# Run on Northflank/CoreWeave (GPU Job):
+#   docker run --gpus all -e OPENAI_API_KEY="sk-..." \
+#     -v $DATA:/data -v $OUTPUT:/output \
+#     ethackers-train \
+#     python scripts/generate_training_data.py \
+#       --image-dir /data/images/train --output-dir /output --fast --n 500
 # ===========================================================================
 
-FROM python:3.11-slim
+FROM nvidia/cuda:12.8.1-devel-ubuntu22.04
 
+ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-venv python3.11-dev python3-pip \
+    git curl libgl1-mesa-glx libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN update-alternatives --install /usr/bin/python  python  /usr/bin/python3.11 1 && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 && \
+    python -m pip install --upgrade pip
 
 WORKDIR /app
 
+# PyTorch + CUDA (cached layer)
 RUN pip install --no-cache-dir \
-    numpy scipy scikit-learn joblib tqdm
+    torch torchvision --index-url https://download.pytorch.org/whl/cu128
 
-COPY action_module/ ./action_module/
-COPY src/label_ontology.py ./src/label_ontology.py
-COPY scripts/train_action_model.py ./scripts/
+# HuggingFace transformers from git (SAM2 + Grounding DINO support)
+RUN pip install --no-cache-dir \
+    "git+https://github.com/huggingface/transformers" \
+    huggingface_hub accelerate
 
-ENTRYPOINT ["python", "scripts/train_action_model.py"]
+# All other deps
+RUN pip install --no-cache-dir \
+    numpy scipy scikit-learn joblib \
+    openai tqdm psutil \
+    pillow opencv-python-headless pycocotools \
+    ultralytics matplotlib
+
+COPY . .
