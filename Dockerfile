@@ -24,25 +24,21 @@ FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# Best-effort apt install for optional extras (opencv + gnupg for gcloud).
+# Best-effort apt install for optional extras (opencv runtime libs).
 # Wrapped in `|| true` so a temporary Ubuntu mirror outage doesn't break the
 # build — the PyTorch base image already provides everything Python needs.
 RUN (apt-get update && apt-get install -y --no-install-recommends \
-       libgl1 libglib2.0-0 gnupg ca-certificates wget \
+       libgl1 libglib2.0-0 ca-certificates \
        && rm -rf /var/lib/apt/lists/*) || \
     echo "Apt install skipped (mirrors unreachable) — base image should cover essentials."
-
-# Install Google Cloud SDK via curl installer (downloads from
-# dl.google.com, independent of Ubuntu mirrors).
-RUN curl -sSL https://sdk.cloud.google.com > /tmp/gcloud-install.sh \
-    && bash /tmp/gcloud-install.sh --disable-prompts --install-dir=/usr/local \
-    && rm /tmp/gcloud-install.sh
-ENV PATH=/usr/local/google-cloud-sdk/bin:$PATH
-RUN gsutil --version && gcloud --version
 
 WORKDIR /app
 
 RUN pip install --no-cache-dir --upgrade pip
+
+# Install gsutil via pip (published by Google on PyPI, no apt / curl needed)
+RUN pip install --no-cache-dir gsutil
+RUN gsutil version
 
 # HuggingFace transformers from git (SAM2 + Grounding DINO support)
 RUN pip install --no-cache-dir \
