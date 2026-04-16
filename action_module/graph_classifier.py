@@ -434,12 +434,20 @@ class GraphClassifier:
         if self._model is not None:
             try:
                 probs = self._model.predict_proba(vec.reshape(1, -1))[0]
-                # Re-order to STOP/SLOW/CONTINUE if sklearn reordered classes
-                order = [_CLS_IDX[c] for c in CLASSES]
+                # Re-order to STOP/SLOW/CONTINUE; assign 0 to any missing class
+                # (handles classifiers trained on a subset of CLASSES, e.g. when
+                # the training set didn't contain CONTINUE samples).
                 model_classes = list(self._model.classes_)
                 reordered = np.array([
-                    probs[model_classes.index(c)] for c in CLASSES
+                    probs[model_classes.index(c)] if c in model_classes else 0.0
+                    for c in CLASSES
                 ], dtype=np.float32)
+                # Re-normalise so probabilities still sum to 1
+                total = float(reordered.sum())
+                if total > 0:
+                    reordered = reordered / total
+                else:
+                    return _rule_probabilities(vec)
                 return reordered
             except Exception as e:
                 warnings.warn(f"Classifier predict_proba failed ({e}), using rule fallback.")

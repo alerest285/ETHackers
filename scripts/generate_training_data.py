@@ -196,7 +196,12 @@ def run(
 
         # Step 4 — Depth
         try:
-            raw_depth  = np.array(depth_pipe(image)["depth"], dtype=np.float32)
+            depth_out = depth_pipe(image)["depth"]
+            # HF pipeline can return a torch.Tensor (sometimes bf16 when model is
+            # bf16) or a PIL Image. numpy can't convert bf16 directly, so cast.
+            if isinstance(depth_out, torch.Tensor):
+                depth_out = depth_out.detach().to(torch.float32).cpu().numpy()
+            raw_depth  = np.array(depth_out, dtype=np.float32)
             norm_depth = _norm_depth(raw_depth)
         except Exception as e:
             tqdm.write(f"  [{stem}] depth failed ({e})")
