@@ -537,7 +537,7 @@ class GraphClassifier:
         var_explained = pca_step.explained_variance_ratio_.sum()
         print(
             f"Trained on {len(y)} samples  |  "
-            f"PCA: {n_features}d → {n_components}d "
+            f"PCA: {n_features}d -> {n_components}d "
             f"({var_explained:.1%} variance retained)  |  "
             f"Classes: {list(pipeline.classes_)}"
         )
