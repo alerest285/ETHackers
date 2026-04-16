@@ -1,11 +1,11 @@
 """
-LLM Module — GPT-4o scene understanding via OpenAI API.
+LLM Module — Claude scene understanding via Anthropic API.
 
-No local weights — uses the OpenAI cloud API.
+No local weights — uses the Anthropic cloud API.
 
 Set your API key in one of two ways:
   1. Environment variable (recommended):
-       export OPENAI_API_KEY=sk-...
+       export ANTHROPIC_API_KEY=sk-ant-...
   2. Hardcode in this file (see API_KEY below) — fine for local hackathon use.
 
 Images passed to the model:
@@ -28,16 +28,19 @@ import os
 import re
 from pathlib import Path
 
-from openai import OpenAI
+import yaml
+import anthropic
 
 # ── config ────────────────────────────────────────────────────────────────────
 
-MODEL       = "gpt-4o-mini"
-BASE_URL    = None   # use default OpenAI endpoint
-API_KEY_ENV = "OPENAI_API_KEY"
+MODEL = "claude-haiku-4-5-20251001"
 
-# Paste your key here or set the environment variable above
-API_KEY     = "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"   # e.g. "sk-..."
+def _load_api_key() -> str:
+    config_path = Path(__file__).parent.parent / "config.yaml"
+    if config_path.exists():
+        with open(config_path) as f:
+            return yaml.safe_load(f).get("anthropic_api_key", "")
+    return os.environ.get("ANTHROPIC_API_KEY", "")
 
 OUT_ROOT    = Path("data/pipeline_output/llm")
 OVERLAY_DIR = Path("data/pipeline_output/overlays")
@@ -90,16 +93,13 @@ DECISION: <STOP|SLOW|CONTINUE> (<confidence>) — <justification>"""
 
 # ── client ────────────────────────────────────────────────────────────────────
 
-def get_client() -> OpenAI:
-    api_key = API_KEY or os.environ.get(API_KEY_ENV)
+def get_client() -> anthropic.Anthropic:
+    api_key = _load_api_key()
     if not api_key:
         raise EnvironmentError(
-            f"Missing API key. Either set API_KEY in llm.py or run: export {API_KEY_ENV}=sk-..."
+            "Missing API key. Set anthropic_api_key in config.yaml or export ANTHROPIC_API_KEY=sk-ant-..."
         )
-    kwargs = {"api_key": api_key}
-    if BASE_URL:
-        kwargs["base_url"] = BASE_URL
-    return OpenAI(**kwargs)
+    return anthropic.Anthropic(api_key=api_key)
 
 
 def _encode_image(path: Path) -> str:
@@ -109,29 +109,30 @@ def _encode_image(path: Path) -> str:
 
 
 def _image_message(path: Path) -> dict:
-    ext    = path.suffix.lower().lstrip(".")
-    mime   = "image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}"
-    data   = _encode_image(path)
+    ext  = path.suffix.lower().lstrip(".")
+    mime = "image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}"
+    data = _encode_image(path)
     return {
-        "type": "image_url",
-        "image_url": {"url": f"data:{mime};base64,{data}"},
+        "type": "image",
+        "source": {"type": "base64", "media_type": mime, "data": data},
     }
 
 
 # ── inference ─────────────────────────────────────────────────────────────────
 
 def analyse(
-    client:         OpenAI,
+    client:         anthropic.Anthropic,
     original_path:  Path,
     overlay_path:   Path,
     detections:     list[dict],
     max_tokens:     int = 512,
 ) -> str:
-    """Call the Qwen API and return the model's scene analysis."""
-    response = client.chat.completions.create(
+    """Call the Claude API and return the model's scene analysis."""
+    response = client.messages.create(
         model=MODEL,
+        max_tokens=max_tokens,
+        system=SYSTEM_PROMPT,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": [
@@ -141,15 +142,14 @@ def analyse(
                 ],
             },
         ],
-        max_tokens=max_tokens,
     )
-    return response.choices[0].message.content.strip()
+    return response.content[0].text.strip()
 
 
 # ── scene graph decision ──────────────────────────────────────────────────────
 
 def analyse_with_scene_graph(
-    client:           OpenAI,
+    client:           anthropic.Anthropic,
     original_path:    Path,
     scene_graph_text: str,
     safety_rules:     str,
@@ -190,16 +190,16 @@ def analyse_with_scene_graph(
     ]
 
     try:
-        response = client.chat.completions.create(
+        response = client.messages.create(
             model=MODEL,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user_content},
-            ],
             max_tokens=max_tokens,
+            system=system,
+            messages=[
+                {"role": "user", "content": user_content},
+            ],
             temperature=0.1,
         )
-        raw = response.choices[0].message.content.strip()
+        raw = response.content[0].text.strip()
 
         # Try direct JSON parse
         try:
@@ -247,7 +247,7 @@ def _rule_fallback(scene_graph_text: str) -> dict:
 # ── file-level helpers ────────────────────────────────────────────────────────
 
 def process_one(
-    client:        OpenAI,
+    client:        anthropic.Anthropic,
     overlay_path:  Path,
     original_path: Path,
     json_path:     Path,
@@ -270,7 +270,7 @@ def process_one(
     return out_path
 
 
-def run_all(client: OpenAI, output_dir: Path = OUT_ROOT) -> None:
+def run_all(client: anthropic.Anthropic, output_dir: Path = OUT_ROOT) -> None:
     """Process every overlay that has a matching detections JSON."""
     overlays = sorted(OVERLAY_DIR.glob("*_overlay.png"))
     if not overlays:

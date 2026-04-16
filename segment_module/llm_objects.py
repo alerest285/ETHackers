@@ -22,13 +22,19 @@ from pathlib import Path
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from openai import OpenAI
+import anthropic
+import yaml
 
 # ── config ────────────────────────────────────────────────────────────────────
 
-API_KEY_ENV = "OPENAI_API_KEY"
-API_KEY     = "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"
-MODEL       = "gpt-4o-mini"
+MODEL = "claude-haiku-4-5-20251001"
+
+def _load_api_key() -> str:
+    config_path = Path(__file__).parent.parent / "config.yaml"
+    if config_path.exists():
+        with open(config_path) as f:
+            return yaml.safe_load(f).get("anthropic_api_key", "")
+    return os.environ.get("ANTHROPIC_API_KEY", "")
 
 SYSTEM_PROMPT = """\
 You are a computer vision expert specialising in open-vocabulary object detection \
@@ -123,23 +129,23 @@ Rules:
 - The SIGN for a wet floor -> SAFETY_MARKER, but the wet patch itself -> OBSTACLE."""
 
 
-def classify_label(client: OpenAI, label: str) -> str:
-    """Ask GPT-4o-mini to classify a single label into one of the 6 groups.
+def classify_label(client: anthropic.Anthropic, label: str) -> str:
+    """Ask Claude to classify a single label into one of the 6 groups.
 
     Returns the group name. Falls back to "OBSTACLE" (conservative) on any
     malformed response or API failure.
     """
     try:
-        response = client.chat.completions.create(
+        response = client.messages.create(
             model=MODEL,
-            messages=[
-                {"role": "system", "content": CLASSIFY_SYSTEM},
-                {"role": "user",   "content": f"Label: {label!r}"},
-            ],
             max_tokens=8,
+            system=CLASSIFY_SYSTEM,
+            messages=[
+                {"role": "user", "content": f"Label: {label!r}"},
+            ],
             temperature=0,
         )
-        raw = response.choices[0].message.content.strip().upper()
+        raw = response.content[0].text.strip().upper()
     except Exception:
         raw = ""
 
@@ -150,7 +156,7 @@ def classify_label(client: OpenAI, label: str) -> str:
     return raw if raw in valid else "OBSTACLE"
 
 
-def classify_and_learn(client: OpenAI, detections: list[dict]) -> list[dict]:
+def classify_and_learn(client: anthropic.Anthropic, detections: list[dict]) -> list[dict]:
     """Classify every detection flagged `unmapped`, persist to the ontology,
     and rewrite its risk_group / risk_score in-place.
 
@@ -186,11 +192,11 @@ def classify_and_learn(client: OpenAI, detections: list[dict]) -> list[dict]:
 
 # ── client ────────────────────────────────────────────────────────────────────
 
-def load_client() -> OpenAI:
-    key = API_KEY or os.environ.get(API_KEY_ENV, "")
+def load_client() -> anthropic.Anthropic:
+    key = _load_api_key()
     if not key:
-        raise EnvironmentError(f"Set {API_KEY_ENV} or hardcode API_KEY in llm_objects.py")
-    return OpenAI(api_key=key)
+        raise EnvironmentError("Set anthropic_api_key in config.yaml or export ANTHROPIC_API_KEY=sk-ant-...")
+    return anthropic.Anthropic(api_key=key)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -205,37 +211,41 @@ def _encode_image(image: Image.Image) -> str:
 # ── public API ────────────────────────────────────────────────────────────────
 
 def get_detection_prompt(
-    client:    OpenAI,
+    client:    anthropic.Anthropic,
     image:     Image.Image,
     max_tokens: int = 128,
 ) -> str:
     """
-    Ask GPT-4o-mini to generate an optimised Grounding DINO prompt for the image.
+    Ask Claude to generate an optimised Grounding DINO prompt for the image.
 
     Returns:
         A dot-separated phrase string ready to pass to grounding_dino.detect().
         e.g. "person . forklift . safety cone . cardboard box ."
     """
-    response = client.chat.completions.create(
+    response = client.messages.create(
         model=MODEL,
+        max_tokens=max_tokens,
+        system=SYSTEM_PROMPT,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": [
                     {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{_encode_image(image)}"},
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": _encode_image(image),
+                        },
                     },
                     {"type": "text", "text": USER_PROMPT},
                 ],
             },
         ],
-        max_tokens=max_tokens,
         temperature=0.2,
     )
 
-    raw = response.choices[0].message.content.strip()
+    raw = response.content[0].text.strip()
 
     # Normalise: ensure it ends with a dot and has no stray whitespace
     if not raw.endswith("."):

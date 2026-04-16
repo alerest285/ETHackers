@@ -108,14 +108,14 @@ class LLMActor:
 
     @staticmethod
     def _img_part(path: Optional[Path]) -> Optional[dict]:
-        """Encode an image file as an OpenAI vision content part."""
+        """Encode an image file as an Anthropic vision content part."""
         if path is None or not Path(path).exists():
             return None
         p    = Path(path)
         ext  = p.suffix.lower().lstrip(".")
         mime = "image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}"
         data = base64.b64encode(p.read_bytes()).decode()
-        return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}}
+        return {"type": "image", "source": {"type": "base64", "media_type": mime, "data": data}}
 
     @staticmethod
     def _depth_stats(depth_arr: Optional[np.ndarray]) -> str:
@@ -243,16 +243,16 @@ class LLMActor:
 
         # ── API call ──────────────────────────────────────────────────────────
         try:
-            resp = self.client.chat.completions.create(
+            resp = self.client.messages.create(
                 model=self.model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user",   "content": user_parts},
-                ],
                 max_tokens=256,
+                system=system,
+                messages=[
+                    {"role": "user", "content": user_parts},
+                ],
                 temperature=self.temperature,
             )
-            raw = resp.choices[0].message.content.strip()
+            raw = resp.content[0].text.strip()
 
             try:
                 parsed = json.loads(raw)
