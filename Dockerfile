@@ -23,7 +23,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 python3.11-venv python3.11-dev python3-pip \
+    python3 python3-venv python3-dev python3-pip \
     git curl wget libgl1-mesa-glx libglib2.0-0 \
     apt-transport-https ca-certificates gnupg \
     && rm -rf /var/lib/apt/lists/*
@@ -37,8 +37,7 @@ RUN curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -
     && gsutil --version \
     && gcloud --version
 
-RUN update-alternatives --install /usr/bin/python  python  /usr/bin/python3.11 1 && \
-    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 && \
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3 1 && \
     python -m pip install --upgrade pip
 
 WORKDIR /app
