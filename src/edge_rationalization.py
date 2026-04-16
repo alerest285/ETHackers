@@ -123,24 +123,23 @@ Return ONLY the JSON object, no other text."""
 # ── LLM call ──────────────────────────────────────────────────────────────────
 
 def _call_llm(client, annotated_image: Image.Image, prompt: str) -> list[dict]:
-    """Send the annotated image + prompt to GPT-4o-mini, return parsed detections list."""
+    """Send the annotated image + prompt to Claude Haiku, return parsed detections list."""
     img_data = _encode_pil(annotated_image)
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
         messages=[{
             "role": "user",
             "content": [
                 {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{img_data}"},
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/png", "data": img_data},
                 },
                 {"type": "text", "text": prompt},
             ],
         }],
         max_tokens=600,
-        response_format={"type": "json_object"},
     )
-    raw = response.choices[0].message.content.strip()
+    raw = response.content[0].text.strip()
     parsed = json.loads(raw)
     # Unwrap either {"detections": [...]} or a bare list
     if isinstance(parsed, dict):

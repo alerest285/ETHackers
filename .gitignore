@@ -53,5 +53,8 @@ desktop.ini
 .vscode/
 .idea/
 
+# ── Secrets ───────────────────────────────────────────────────────────────────
+config.yaml
+
 # ── Claude Code local settings ────────────────────────────────────────────────
 .claude/settings.local.json

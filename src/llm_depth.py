@@ -153,23 +153,22 @@ def get_llm_depth_signals(
         img_data  = _encode_pil(annotated)
         prompt    = _build_prompt(detections, W, H)
 
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
             messages=[{
                 "role": "user",
                 "content": [
                     {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{img_data}"},
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/png", "data": img_data},
                     },
                     {"type": "text", "text": prompt},
                 ],
             }],
             max_tokens=1800,
-            response_format={"type": "json_object"},
         )
 
-        results  = _parse_response(response.choices[0].message.content.strip())
+        results  = _parse_response(response.content[0].text.strip())
         enriched = [dict(d) for d in detections]
 
         for res in results:
