@@ -56,5 +56,12 @@ desktop.ini
 # ── Secrets ───────────────────────────────────────────────────────────────────
 config.yaml
 
+# ── Local / non-public files ──────────────────────────────────────────────────
+PLAN.md
+THEKER - Project Barcelona.pdf
+check_deps.py
+CLAUDE.md
+.claude/
+
 # ── Claude Code local settings ────────────────────────────────────────────────
 .claude/settings.local.json
