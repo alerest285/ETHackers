@@ -40,9 +40,11 @@ RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir gsutil
 RUN gsutil version
 
-# HuggingFace transformers from git (SAM2 + Grounding DINO support)
+# HuggingFace transformers (SAM2 + Grounding DINO support in >=4.46).
+# Using PyPI release instead of git master to avoid GitHub fetch issues
+# on Northflank's build node.
 RUN pip install --no-cache-dir \
-    "git+https://github.com/huggingface/transformers" \
+    "transformers>=4.46" \
     huggingface_hub accelerate
 
 # All other Python deps (PyTorch + torchvision already in base image)
