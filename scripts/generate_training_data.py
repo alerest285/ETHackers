@@ -115,7 +115,13 @@ def run(
           f"{len(todo)} to process.\n")
 
     # ── Load models ──────────────────────────────────────────────────────────
-    use_bf16     = fast and torch.cuda.is_available()
+    # NOTE: bf16 disabled by default — HF depth pipeline returns bf16 tensors
+    # that numpy can't convert (Got unsupported ScalarType BFloat16). The
+    # marginal speedup isn't worth the compatibility cost on B200. Override
+    # with ENABLE_BF16=1 if needed.
+    import os
+    use_bf16     = (fast and torch.cuda.is_available()
+                    and os.environ.get("ENABLE_BF16") == "1")
     th_dtype     = torch.bfloat16 if use_bf16 else torch.float32
     depth_model  = DEPTH_LARGE if fast else DEPTH_SMALL
     sam2_model   = SAM2_LARGE  if fast else SAM2_BASE
