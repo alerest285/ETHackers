@@ -409,7 +409,11 @@ async def run_full(
             try:
                 from segment_module.grounding_dino import detect as gdino_detect
                 gdino = _get_gdino()
-                gdino_dets = gdino_detect(gdino, pil, llm_prompt, score_threshold=0.30)
+                gdino_dets = gdino_detect(
+                    gdino, pil, llm_prompt,
+                    score_threshold=0.30,
+                    learn_client=llm_client_shared,
+                )
                 img = _draw_detections_on(base_bgr, gdino_dets)
                 yield _event("gdino", "ok", title="Grounding DINO",
                              image=_bgr_to_b64(img),
@@ -765,21 +769,28 @@ async def run_full(
         action_result = None
         safety_rules_path = ROOT / "action_module" / "SAFETY_RULES.md"
         if llm_client_shared is not None and safety_rules_path.exists():
+            import tempfile, os as _os
+            tmp_path = None
             try:
-                # analyse_with_scene_graph needs a file path; drop to a temp file
-                import tempfile
                 from llm_module.llm import analyse_with_scene_graph
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                    pil.save(tmp.name, format="PNG")
-                    action_result = analyse_with_scene_graph(
-                        client=llm_client_shared,
-                        original_path=Path(tmp.name),
-                        scene_graph_text=scene_text,
-                        safety_rules=safety_rules_path.read_text(encoding="utf-8"),
-                    )
+                    tmp_path = tmp.name
+                    pil.save(tmp_path, format="PNG")
+                action_result = analyse_with_scene_graph(
+                    client=llm_client_shared,
+                    original_path=Path(tmp_path),
+                    scene_graph_text=scene_text,
+                    safety_rules=safety_rules_path.read_text(encoding="utf-8"),
+                )
             except Exception as e:
                 traceback.print_exc()
                 action_result = None
+            finally:
+                if tmp_path:
+                    try:
+                        _os.unlink(tmp_path)
+                    except OSError:
+                        pass
 
         if action_result is None:
             # Fallback to heuristic critic
