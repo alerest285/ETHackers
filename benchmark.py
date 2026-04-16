@@ -71,6 +71,8 @@ from src.edge_rationalization      import rationalize_edge_detections
 from src.llm_depth                 import get_llm_depth_signals
 from llm_module.llm                import get_client  as get_llm_client,  analyse_with_scene_graph
 from lift_3d                       import SceneGraphBuilder
+from action_module.graph_classifier import GraphClassifier
+from action_module.active_learning  import UncertaintyBuffer, maybe_run_active_learning
 
 # ── submission schema ─────────────────────────────────────────────────────────
 GROUP_TO_CAT: dict[str, int] = {
@@ -96,6 +98,36 @@ def _norm_depth(raw: np.ndarray) -> np.ndarray:
     return (1.0 - (raw - d_min) / (d_max - d_min + 1e-6)).astype(np.float32)
 
 
+_ACTION_RANK = {"STOP": 0, "SLOW": 1, "CONTINUE": 2}
+
+def _ensemble(clf_result: dict, llm_result: dict) -> dict:
+    """Combine graph classifier + LLM: take more conservative action."""
+    clf_action = clf_result["action"]
+    llm_action = llm_result["action"]
+    clf_conf   = clf_result["confidence"]
+    llm_conf   = llm_result["confidence"]
+
+    if clf_action == llm_action:
+        return {
+            "action":     clf_action,
+            "confidence": round((clf_conf + llm_conf) / 2, 4),
+            "reasoning":  llm_result.get("reasoning", ""),
+        }
+
+    # Disagreement — pick more conservative (lower rank = more cautious)
+    if _ACTION_RANK[clf_action] < _ACTION_RANK[llm_action]:
+        action, conf = clf_action, clf_conf
+    else:
+        action, conf = llm_action, llm_conf
+
+    return {
+        "action":     action,
+        "confidence": round(conf * 0.90, 4),   # reduce by 10% on disagreement
+        "reasoning":  (llm_result.get("reasoning", "") +
+                       f" [classifier disagreed: {clf_action}]"),
+    }
+
+
 def _detection_summary(detections: list[dict]) -> str:
     """Minimal fallback scene text when the scene graph builder fails."""
     if not detections:
@@ -114,19 +146,9 @@ def _detection_summary(detections: list[dict]) -> str:
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def run(n: int | None, out_path: Path, team_name: str, run_eval: bool = True,
-        conf: float = 0.25, fast: bool = False, learn: str = "off") -> None:
-    """
-    learn: How to handle UNKNOWN-fallback labels.
-      "off"  — keep as UNKNOWN (default; safe for unattended benchmarks).
-      "auto" — GPT-4o-mini classifies each new label and persists to
-               data/learned_aliases.json. One API call per novel label
-               (not per occurrence).
-      NOTE: interactive mode is deliberately NOT offered here; a 3.8k-image
-      benchmark would hang on stdin. Use pipeline.py --learn interactive to
-      teach the ontology, then re-run the benchmark with --learn off.
-    """
-    if learn not in ("off", "auto"):
-        raise ValueError(f"benchmark learn must be 'off' or 'auto'; got {learn!r}")
+        conf: float = 0.25, fast: bool = False,
+        active_learning: bool = False, al_top_k: int = 30,
+        al_headless: bool = False, al_export: Path | None = None) -> None:
 
     for d in (OUT_GRAPH,):
         d.mkdir(parents=True, exist_ok=True)
@@ -184,6 +206,8 @@ def run(n: int | None, out_path: Path, team_name: str, run_eval: bool = True,
 
     graph_builder = SceneGraphBuilder(point_cloud_step=4)
     safety_rules  = SAFETY_RULES_PATH.read_text()
+    clf           = GraphClassifier()          # loads trained model if available
+    unc_buffer    = UncertaintyBuffer()
     print("All models loaded.\n")
 
     predictions: list[dict] = []
@@ -218,11 +242,8 @@ def run(n: int | None, out_path: Path, team_name: str, run_eval: bool = True,
             prompt = "person . vehicle . forklift . barrel . cone . box . ladder ."
 
         # Step 2 — Grounding DINO
-        detect_kwargs = {"score_threshold": conf}
-        if learn == "auto":
-            detect_kwargs["learn_client"] = llm_client
         try:
-            detections = detect(gdino, image, prompt, **detect_kwargs)
+            detections = detect(gdino, image, prompt, score_threshold=conf)
         except Exception as e:
             tqdm.write(f"  [{stem}] Grounding DINO failed ({e}) — no detections")
             detections = []
@@ -290,23 +311,35 @@ def run(n: int | None, out_path: Path, team_name: str, run_eval: bool = True,
             tqdm.write(f"  [{stem}] scene graph failed ({e}) — using detection summary")
             scene_text = _detection_summary(enriched)
 
-        # Step 6 — LLM action decision
-        result = analyse_with_scene_graph(
+        # Step 6a — Graph classifier (uses rule engine until trained)
+        graph_obj = graph if "graph" in dir() else None
+        clf_result = clf.predict(enriched, graph_obj, image)
+
+        # Step 6b — LLM action decision
+        llm_result = analyse_with_scene_graph(
             client           = llm_client,
             original_path    = img_path,
             scene_graph_text = scene_text,
             safety_rules     = safety_rules,
         )
 
+        # Ensemble: take more conservative action; average confidence when they agree
+        final_result = _ensemble(clf_result, llm_result)
+
+        # Record for active learning
+        unc_buffer.record(stem, img_path, clf_result)
+
         predictions.append({
             "image_id":   image_id,
-            "action":     result["action"],
-            "confidence": round(result["confidence"], 4),
-            "reasoning":  result["reasoning"],
+            "action":     final_result["action"],
+            "confidence": round(final_result["confidence"], 4),
+            "reasoning":  final_result["reasoning"],
         })
 
         tqdm.write(
-            f"  [{stem}] {result['action']} ({result['confidence']:.2f})"
+            f"  [{stem}] {final_result['action']} ({final_result['confidence']:.2f})"
+            f"  clf={clf_result['action']}({clf_result['confidence']:.2f})"
+            f"  llm={llm_result['action']}({llm_result['confidence']:.2f})"
         )
 
         # Detection records (20% of score)
@@ -345,6 +378,21 @@ def run(n: int | None, out_path: Path, team_name: str, run_eval: bool = True,
         n_total = len(predictions) or 1
         print(f"  {act:10s}: {c:5d}  ({c / n_total:.1%})")
 
+    # ── Active learning ───────────────────────────────────────────────────────
+    if active_learning:
+        buffer_path = OUT_ROOT / "uncertainty_buffer.json"
+        maybe_run_active_learning(
+            buffer       = unc_buffer,
+            buffer_path  = buffer_path,
+            det_dir      = OUT_ROOT / "detections" if (OUT_ROOT / "detections").exists()
+                           else ROOT / "data" / "pipeline_output" / "detections",
+            graphs_dir   = OUT_GRAPH,
+            top_k        = al_top_k,
+            headless     = al_headless,
+            export_dir   = al_export,
+            img_dirs     = [VAL_IMAGES],
+        )
+
     if not run_eval:
         return
 
@@ -378,20 +426,27 @@ if __name__ == "__main__":
                         help="Detection confidence threshold")
     parser.add_argument("--no-eval", action="store_true",
                         help="Skip evaluate_local.py (just write predictions.json)")
-    parser.add_argument("--fast",    action="store_true",
+    parser.add_argument("--fast",       action="store_true",
                         help="B100-optimised: larger models, BF16, skip intermediate LLM steps")
-    parser.add_argument("--learn",   choices=("off", "auto"), default="off",
-                        help="Handle UNKNOWN labels: off (keep as UNKNOWN) or "
-                             "auto (GPT-4o-mini classifies + persists). "
-                             "Use pipeline.py --learn interactive for human-in-the-loop.")
+    parser.add_argument("--active-learning", action="store_true",
+                        help="After the run, show low-confidence samples for labelling")
+    parser.add_argument("--al-top-k",   type=int,  default=30,
+                        help="Number of uncertain samples to label (default: 30)")
+    parser.add_argument("--al-headless", action="store_true",
+                        help="Export review bundle instead of interactive session")
+    parser.add_argument("--al-export",  type=Path, default=None,
+                        help="Directory to export review bundle (headless mode)")
     args = parser.parse_args()
 
     run(
-        n         = args.n,
-        out_path  = args.out,
-        team_name = args.team,
-        run_eval  = not args.no_eval,
-        conf      = args.conf,
-        fast      = args.fast,
-        learn     = args.learn,
+        n               = args.n,
+        out_path        = args.out,
+        team_name       = args.team,
+        run_eval        = not args.no_eval,
+        conf            = args.conf,
+        fast            = args.fast,
+        active_learning = args.active_learning,
+        al_top_k        = args.al_top_k,
+        al_headless     = args.al_headless,
+        al_export       = args.al_export,
     )

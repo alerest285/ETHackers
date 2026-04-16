@@ -21,7 +21,7 @@ ultralytics
 
 # ── Vision / image processing ─────────────────────────────────────────────────
 pillow
-opencv-python
+opencv-python-headless
 pycocotools
 
 # ── LLM API ───────────────────────────────────────────────────────────────────
@@ -31,5 +31,7 @@ openai
 tqdm
 psutil
 
-# ── Decision engine (Phase 5) ─────────────────────────────────────────────────
-openai
+# ── Decision engine / classifier ──────────────────────────────────────────────
+scikit-learn
+joblib
+matplotlib
