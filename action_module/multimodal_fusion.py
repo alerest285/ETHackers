@@ -121,10 +121,12 @@ class _GATLayer(nn.Module):
         self.a   = nn.Parameter(torch.empty(n_heads, 2 * self.head_dim))
         nn.init.xavier_uniform_(self.a.unsqueeze(0))
 
-        self.leaky = nn.LeakyReLU(0.2)
-        self.drop  = nn.Dropout(dropout)
-        self.norm  = nn.LayerNorm(out_dim if concat else out_dim // n_heads * n_heads)
-        self.act   = nn.GELU()
+        self.leaky     = nn.LeakyReLU(0.2)
+        self.drop      = nn.Dropout(dropout)
+        self.norm      = nn.LayerNorm(out_dim)
+        self.act       = nn.GELU()
+        # when averaging heads (last layer), project head_dim → out_dim
+        self.head_proj = nn.Linear(self.head_dim, out_dim) if not concat else None
 
     def forward(
         self,
@@ -140,7 +142,10 @@ class _GATLayer(nn.Module):
         Wh = self.W(h).reshape(N, H, D)          # (N, H, D)
 
         if edge_index.shape[1] == 0:
-            out = Wh.reshape(N, H * D) if self.concat else Wh.mean(1).reshape(N, -1)
+            if self.concat:
+                out = Wh.reshape(N, H * D)
+            else:
+                out = self.head_proj(Wh.mean(1))   # (N, head_dim) → (N, out_dim)
             return self.norm(self.act(out))
 
         src, dst = edge_index[0], edge_index[1]  # (E,)
@@ -163,7 +168,7 @@ class _GATLayer(nn.Module):
         if self.concat:
             out = agg.reshape(N, H * D)
         else:
-            out = agg.mean(dim=1)                # average heads (last layer)
+            out = self.head_proj(agg.mean(dim=1))  # (N, head_dim) → (N, out_dim)
 
         return self.norm(self.act(out))
 
@@ -414,14 +419,18 @@ class DilatedResNetEncoder(nn.Module):
             # Replace first conv: 3-channel → 1-channel
             base.conv1 = nn.Conv2d(1, 64, 7, stride=2, padding=3, bias=False)
 
-            # Apply dilation to layer3 and layer4
+            # Apply dilation to layer3 and layer4.
+            # Remove stride from conv1 AND downsample (not just downsample) so the
+            # residual shortcut and the conv path stay at the same spatial size.
             for block in base.layer3:
+                block.conv1.stride    = (1, 1)
                 block.conv2.dilation  = (2, 2)
                 block.conv2.padding   = (2, 2)
                 block.conv2.stride    = (1, 1)
                 if block.downsample is not None:
                     block.downsample[0].stride = (1, 1)
             for block in base.layer4:
+                block.conv1.stride    = (1, 1)
                 block.conv2.dilation  = (4, 4)
                 block.conv2.padding   = (4, 4)
                 block.conv2.stride    = (1, 1)

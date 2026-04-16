@@ -1,5 +1,6 @@
 """
-Main pipeline — 12-step perception-to-decision.
+LLM-Actor pipeline — same perception stack as pipeline.py, but steps 7–12
+are handled entirely by the LLMActor instead of MultimodalFusion + NeuralPredictor.
 
 Steps per image:
   1. GPT-4o-mini generates an optimised Grounding DINO object prompt.
@@ -11,27 +12,29 @@ Steps per image:
      4c. Triple-fused depth (DA + real-world size + bbox area) per object.
   5. 3D lift: depth map → point cloud.
   6. Scene graph from 3D point cloud + detections.
-  7. MultimodalFusion encodes graph + image + depth + point cloud → embedding.
-  8. NeuralPredictor maps embedding → action probability distribution.
-  9. LLMTeacher (neural_predictor.py) produces its own LLM action distribution.
- 10. If the two distributions disagree, Decider tie-breaks.
- 11. Decider (decision_module/decider.py) explains the final action.
- 12. Save action + confidence + explanation to one JSON file.
+  7. LLMActor: send scene graph + depth stats + point cloud stats +
+               segmentation image + depth image → STOP/SLOW/CONTINUE
+               probabilities, confidence, reasoning.
+  8. Track decision entropy to data/pipeline_output/llm_actor_entropy.json
+     for future active learning (high-entropy frames = best labelling targets).
+  9. Save action + confidence + reasoning + full probability distribution
+     to one JSON file per image.
 
 Usage:
-  python src/pipeline.py                  # 5 random images
-  python src/pipeline.py --n 20
-  python src/pipeline.py --n 3 --seed 7   # reproducible sample
+  python src/llmactor_pipeline.py                  # 5 random images
+  python src/llmactor_pipeline.py --n 20
+  python src/llmactor_pipeline.py --n 3 --seed 7   # reproducible sample
 """
 
 import argparse
+import datetime
 import json
+import math
 import random
 import sys
 from pathlib import Path
 
 import numpy as np
-import torch
 from PIL import Image, ImageFile
 from tqdm import tqdm
 from transformers import pipeline as hf_pipeline
@@ -41,7 +44,7 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 # ── repo root on sys.path ─────────────────────────────────────────────────────
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "3d-module"))   # hyphenated folder — import via path
+sys.path.insert(0, str(ROOT / "3d-module"))
 
 # ── local imports ─────────────────────────────────────────────────────────────
 from segment_module.llm_objects    import load_client as load_llm_client, get_detection_prompt
@@ -52,49 +55,39 @@ from src.filter_module             import is_interesting
 from src.edge_rationalization      import rationalize_edge_detections
 from src.llm_depth                 import get_llm_depth_signals
 from lift_3d                       import SceneGraphBuilder, visualize_3d, lift_to_3d
-from action_module.multimodal_fusion import (
-    MultimodalFusion,
-    detections_to_graph_data,
-    pil_to_tensor,
-    depth_array_to_tensor,
-    point_cloud_to_tensor,
-)
-from action_module.neural_predictor import NeuralPredictor, LLMTeacher
-from decision_module.decider        import Decider
+from llm_action_module.actor        import LLMActor
+from llm_action_module.rule_updater import update_rules
 
 # ── paths ─────────────────────────────────────────────────────────────────────
-TRAIN_DIR    = ROOT / "data" / "challenge" / "data" / "images" / "train"
-OUT_ROOT     = ROOT / "data" / "pipeline_output"
-OUT_DET      = OUT_ROOT / "detections"
-OUT_OVERLAY  = OUT_ROOT / "overlays"
-OUT_DEPTH    = OUT_ROOT / "depth_maps"
-OUT_GRAPH    = OUT_ROOT / "scene_graphs"
-OUT_CLOUD    = OUT_ROOT / "point_clouds"
-OUT_ACTION   = OUT_ROOT / "actions"      # final decision JSON (action + confidence + explanation)
-OUT_DISC     = OUT_ROOT / "discarded"
-SAFETY_RULES = ROOT / "action_module" / "SAFETY_RULES.md"
+TRAIN_DIR  = ROOT / "data" / "challenge" / "data" / "images" / "train"
+OUT_ROOT   = ROOT / "data" / "pipeline_output"
+OUT_DET    = OUT_ROOT / "detections"
+OUT_OVERLAY= OUT_ROOT / "overlays"
+OUT_DEPTH  = OUT_ROOT / "depth_maps"
+OUT_GRAPH  = OUT_ROOT / "scene_graphs"
+OUT_CLOUD  = OUT_ROOT / "point_clouds"
+OUT_ACTION = OUT_ROOT / "llm_actions"   # separate folder from the NN pipeline
+OUT_DISC          = OUT_ROOT / "discarded"
+CORRECTIONS_PATH  = OUT_ROOT / "human_corrections.json"
 
-DEPTH_MODEL  = "depth-anything/Depth-Anything-V2-Small-hf"
+DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Small-hf"
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _norm_depth(raw: np.ndarray) -> np.ndarray:
-    """Invert DepthAnything disparity → normalised depth (0=close, 1=far)."""
     d_min, d_max = raw.min(), raw.max()
     return (1.0 - (raw - d_min) / (d_max - d_min + 1e-6)).astype(np.float32)
 
 
 def _save_depth(norm_depth: np.ndarray, stem: str) -> None:
-    """Save normalised depth map as a colourised PNG (inferno colormap)."""
     import cv2
-    d8 = (norm_depth * 255).clip(0, 255).astype(np.uint8)
+    d8      = (norm_depth * 255).clip(0, 255).astype(np.uint8)
     colored = cv2.applyColorMap(d8, cv2.COLORMAP_INFERNO)
     cv2.imwrite(str(OUT_DEPTH / f"{stem}_depth.png"), colored)
 
 
 def _save_overlay(image: Image.Image, segmented: list[dict], stem: str) -> None:
-    """Save SAM2 mask overlay as PNG."""
     overlay_rgba = masks_to_overlay(image, segmented)
     bg = Image.new("RGBA", overlay_rgba.size, (255, 255, 255, 255))
     bg.paste(overlay_rgba, mask=overlay_rgba.split()[3])
@@ -102,7 +95,6 @@ def _save_overlay(image: Image.Image, segmented: list[dict], stem: str) -> None:
 
 
 def _detection_summary(detections: list[dict]) -> str:
-    """Minimal scene text fallback when lift_3d fails."""
     if not detections:
         return "Scene: no objects detected."
     lines = ["Scene (detection summary — no scene graph available):"]
@@ -117,7 +109,6 @@ def _detection_summary(detections: list[dict]) -> str:
 
 
 def _serialise(detections: list[dict]) -> list[dict]:
-    """Return a JSON-safe copy of detections (strips numpy arrays like masks)."""
     out = []
     for d in detections:
         entry = {k: v for k, v in d.items() if k != "mask"}
@@ -130,24 +121,113 @@ def _serialise(detections: list[dict]) -> list[dict]:
     return out
 
 
+# ── active learning ───────────────────────────────────────────────────────────
+
+def _load_corrections() -> list[dict]:
+    if CORRECTIONS_PATH.exists():
+        try:
+            return json.loads(CORRECTIONS_PATH.read_text())
+        except Exception:
+            return []
+    return []
+
+
+def _save_correction(entry: dict) -> None:
+    existing = _load_corrections()
+    existing.append(entry)
+    CORRECTIONS_PATH.write_text(json.dumps(existing, indent=2))
+    print(f"  Correction saved → {CORRECTIONS_PATH}")
+
+
+def _active_learning_prompt(candidate: dict, idx: int, total: int) -> None:
+    """
+    Show one high-entropy prediction and ask the user to verify / correct it.
+    If they disagree, the correction is appended to human_corrections.json and
+    the user is offered an immediate rule update.
+    """
+    VALID = {"STOP", "SLOW", "CONTINUE"}
+    probs = candidate["probabilities"]
+
+    print("\n" + "═" * 60)
+    print(f"  ACTIVE LEARNING — sample {idx} of {total}  "
+          f"(ranked by entropy, highest first)")
+    print("═" * 60)
+    print(f"  Image    : {candidate['image']}")
+    print(f"  Entropy  : {candidate['entropy']:.4f}  "
+          f"(max={math.log2(3):.4f} = fully uncertain)")
+    print(f"  Decision : {candidate['action']}  "
+          f"(confidence {candidate['confidence']:.2f})")
+    print(f"  Reasoning: {candidate['reasoning']}")
+    print(f"  Probs    : " +
+          "  ".join(f"{k}={v:.0%}" for k, v in probs.items()))
+    if candidate.get("overlay_path"):
+        print(f"  Overlay  : {candidate['overlay_path']}")
+    print()
+
+    # Ask for the human's action directly — richer signal than agree/disagree
+    print(f"  What action would YOU have taken for this scene?")
+    while True:
+        try:
+            answer = input("  [STOP / SLOW / CONTINUE]: ").strip().upper()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  (skipped)")
+            return
+        if answer in VALID:
+            break
+        print(f"  Please enter one of: {', '.join(VALID)}")
+
+    agreed = (answer == candidate["action"])
+    kind   = "confirmation" if agreed else "correction"
+    signal = "reinforcement" if agreed else "correction"
+    print(f"  {'✓ Matches prediction' if agreed else '✗ Differs from prediction'} "
+          f"— saving as {signal}.")
+
+    try:
+        note = input("  Optional note for the rule updater (Enter to skip): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        note = ""
+
+    entry = {
+        "type":                    kind,
+        "stem":                    candidate["stem"],
+        "image":                   candidate["image"],
+        "predicted_action":        candidate["action"],
+        "correct_action":          answer,
+        "predicted_confidence":    candidate["confidence"],
+        "predicted_probabilities": probs,
+        "entropy":                 candidate["entropy"],
+        "reasoning":               candidate["reasoning"],
+        "scene_summary":           candidate.get("scene_summary", ""),
+        "user_note":               note,
+        "timestamp":               datetime.datetime.now().isoformat(),
+    }
+    _save_correction(entry)
+
+    verb = "Reinforce" if agreed else "Fix"
+    try:
+        do_update = input(f"\n  {verb} SAFETY_RULES.md now? [y/n]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        do_update = "n"
+
+    if do_update == "y":
+        print()
+        update_rules()
+    else:
+        print("  Run later with:  python llm_action_module/rule_updater.py")
+
+    print("═" * 60)
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def run(
-    n: int = 5,
-    seed: int | None = None,
-    conf: float = 0.25,
-    learn: str = "off",
+    n:               int = 5,
+    seed:            int | None = None,
+    conf:            float = 0.25,
+    learn:           str = "off",
+    active_learning: bool = False,
+    n_correct:       int = 1,
 ) -> None:
-    """
-    Args:
-        learn: How to handle labels that fall back to UNKNOWN (risk=3).
-               "off"         — leave them as UNKNOWN (fail-safe, no API cost, no prompts).
-               "auto"        — GPT-4o-mini classifies each new label and persists it.
-               "interactive" — prompt the user on stdin for each new label.
-               Learned mappings go to data/learned_aliases.json and are auto-loaded
-               on the next run, so each novel label costs at most one prompt/API call
-               across the lifetime of the project.
-    """
     if learn not in ("off", "auto", "interactive"):
         raise ValueError(f"learn must be 'off', 'auto', or 'interactive'; got {learn!r}")
     random.seed(seed if seed is not None else random.randint(0, 2 ** 32))
@@ -166,28 +246,21 @@ def run(
     sample = random.sample(all_images, min(n, len(all_images)))
     print(f"Sampled {len(sample)} images from {len(all_images)} total.\n")
 
-    # ── Load all models once ──────────────────────────────────────────────────
+    # ── Load models ───────────────────────────────────────────────────────────
     print("Loading models ...")
     llm_client    = load_llm_client()
     gdino         = load_gdino()
     sam2_model    = load_sam2()
     depth_pipe    = hf_pipeline(task="depth-estimation", model=DEPTH_MODEL)
     graph_builder = SceneGraphBuilder(point_cloud_step=4)
-
-    # New: multimodal fusion + neural predictor (untrained — random weights)
-    fusion_model  = MultimodalFusion(embed_dim=256)
-    fusion_model.eval()
-    predictor     = NeuralPredictor(embed_dim=256)
-    predictor.eval()
-    teacher       = LLMTeacher()
-    decider       = Decider()
-
+    actor         = LLMActor()
     print("All models loaded.\n")
 
-    kept_count = 0
-    disc_count = 0
+    kept_count  = 0
+    disc_count  = 0
+    run_results = []   # collects per-image results for the active-learning prompt
 
-    for img_path in tqdm(sample, desc="Pipeline"):
+    for img_path in tqdm(sample, desc="LLMActor Pipeline"):
         stem = img_path.stem
 
         try:
@@ -297,19 +370,19 @@ def run(
             tqdm.write(f"  [{stem}] scene graph failed ({e}) — using detection summary")
             scene_text = _detection_summary(enriched)
 
-        # Save depth map PNG
+        # Save depth map PNG (used by actor as visual input)
         try:
             _save_depth(corrected_depth, stem)
         except Exception as e:
             tqdm.write(f"  [{stem}] depth map save failed ({e})")
 
-        # Save SAM2 overlay PNG (needed by LLMTeacher)
+        # Save SAM2 overlay PNG (used by actor as visual input)
         try:
             _save_overlay(image, segmented, stem)
         except Exception as e:
             tqdm.write(f"  [{stem}] overlay failed ({e})")
 
-        # Save point cloud visualisation PNG
+        # Save point cloud visualisation
         if graph is not None:
             try:
                 visualize_3d(
@@ -325,106 +398,54 @@ def run(
         with open(OUT_DET / f"{stem}.json", "w") as f:
             json.dump({"image": img_path.name, "detections": _serialise(enriched)}, f, indent=2)
 
-        # Step 7 — MultimodalFusion: graph + image + depth + point cloud → embedding
-        try:
-            graph_data  = detections_to_graph_data(enriched, graph)
-            # ViT encoder requires 224×224; resize before converting to tensor
-            image_224   = image.resize((224, 224), Image.BILINEAR)
-            seg_t       = pil_to_tensor(image_224)
-            depth_t     = depth_array_to_tensor(corrected_depth)
-            # scale boxes from original image coords to 224×224
-            sx, sy = 224 / W, 224 / H
-            boxes  = [[b[0]*sx, b[1]*sy, b[2]*sx, b[3]*sy] for d in enriched for b in [d["box"]]]
-            pc_t       = (point_cloud_to_tensor(point_cloud_arr)
-                          if point_cloud_arr is not None and len(point_cloud_arr) >= 8
-                          else None)
-            with torch.no_grad():
-                embedding = fusion_model(
-                    graph_data  = graph_data,
-                    seg_image   = seg_t,
-                    bbox_image  = seg_t,    # reuse resized image; no dedicated bbox-annotated image yet
-                    bbox_boxes  = boxes,
-                    depth_map   = depth_t,
-                    point_cloud = pc_t,
-                )
-        except Exception as e:
-            tqdm.write(f"  [{stem}] multimodal fusion failed ({e}) — using zero embedding")
-            embedding = torch.zeros(256)
+        # Step 7 — LLMActor: scene graph + depth + point cloud + images → probabilities
+        # Step 8 — entropy is logged inside actor.query() to llm_actor_entropy.json
+        result = actor.query(
+            scene_graph_text = scene_text,
+            seg_img_path     = OUT_OVERLAY / f"{stem}_overlay.png",
+            depth_img_path   = OUT_DEPTH   / f"{stem}_depth.png",
+            depth_arr        = corrected_depth,
+            point_cloud      = point_cloud_arr,
+            stem             = stem,
+        )
 
-        # Step 8 — NeuralPredictor: embedding → action probability distribution
-        try:
-            nn_result = predictor.predict(embedding)
-        except Exception as e:
-            tqdm.write(f"  [{stem}] neural predictor failed ({e}) — uniform distribution")
-            nn_result = {
-                "action": "CONTINUE",
-                "confidence": 1 / 3,
-                "probabilities": {"STOP": 1/3, "SLOW": 1/3, "CONTINUE": 1/3},
-                "source": "fallback",
-            }
-
-        # Step 9 — LLMTeacher (neural_predictor.py): LLM action distribution for comparison
-        try:
-            teacher_result = teacher.query(
-                stem             = stem,
-                scene_graph_text = scene_text,
-                seg_img_path     = OUT_OVERLAY / f"{stem}_overlay.png",
-                depth_path       = OUT_DEPTH   / f"{stem}_depth.png",
-            )
-        except Exception as e:
-            tqdm.write(f"  [{stem}] LLM teacher failed ({e}) — fallback distribution")
-            teacher_result = {
-                "action": "CONTINUE", "confidence": 1/3,
-                "reasoning": f"fallback: {e}",
-                "soft_label": [1/3, 1/3, 1/3],
-            }
-
-        # Step 10 — Compare distributions; step 11 — Decider explains final output
-        # Decider.decide() always arbitrates and produces the explanation.
-        # When nn_action != teacher_action (agreement=False) it tie-breaks
-        # using the conservative STOP > SLOW > CONTINUE policy.
-        try:
-            final_result = decider.decide(
-                nn_probs       = nn_result["probabilities"],
-                safety_result  = teacher_result,
-                depth_img_path = OUT_DEPTH / f"{stem}_depth.png",
-                embedding      = embedding.cpu().numpy(),
-            )
-        except Exception as e:
-            tqdm.write(f"  [{stem}] decider failed ({e}) — using teacher result")
-            final_result = {
-                "action":        teacher_result["action"],
-                "confidence":    teacher_result["confidence"],
-                "reasoning":     teacher_result.get("reasoning", "decider fallback"),
-                "nn_action":     nn_result["action"],
-                "safety_action": teacher_result["action"],
-                "agreement":     nn_result["action"] == teacher_result["action"],
-            }
-
-        # Step 12 — Store action, confidence, and explanation in one JSON file
+        # Step 9 — Save one JSON: action + confidence + reasoning + full distribution
         output = {
-            "image":            img_path.name,
-            "action":           final_result["action"],
-            "confidence":       final_result["confidence"],
-            "reasoning":        final_result["reasoning"],
-            "nn_action":        final_result.get("nn_action"),
-            "llm_action":       final_result.get("safety_action"),
-            "agreement":        final_result.get("agreement"),
-            "nn_probabilities": nn_result["probabilities"],
-            "llm_result": {
-                "action":     teacher_result["action"],
-                "confidence": teacher_result["confidence"],
-                "reasoning":  teacher_result.get("reasoning", ""),
-            },
+            "image":         img_path.name,
+            "action":        result["action"],
+            "confidence":    result["confidence"],
+            "reasoning":     result["reasoning"],
+            "probabilities": result["probabilities"],
+            "entropy":       result["entropy"],
         }
         with open(OUT_ACTION / f"{stem}_action.json", "w") as f:
             json.dump(output, f, indent=2)
 
+        # Track for active-learning prompt at end of run
+        run_results.append({
+            "stem":                   stem,
+            "image":                  img_path.name,
+            "action":                 result["action"],
+            "confidence":             result["confidence"],
+            "reasoning":              result["reasoning"],
+            "probabilities":          result["probabilities"],
+            "entropy":                result["entropy"],
+            "scene_summary":          scene_text[:400],   # for rule updater context
+            "overlay_path":           str(OUT_OVERLAY / f"{stem}_overlay.png"),
+        })
+
         tqdm.write(
-            f"  [{stem}] {final_result['action']} ({final_result['confidence']:.2f}) "
-            f"nn={final_result.get('nn_action')} llm={final_result.get('safety_action')} "
-            f"agree={final_result.get('agreement')} — {final_result['reasoning'][:60]}"
+            f"  [{stem}] {result['action']} "
+            f"(conf={result['confidence']:.2f} entropy={result['entropy']:.3f}) "
+            f"— {result['reasoning'][:70]}"
         )
+
+    # ── Active-learning correction ────────────────────────────────────────────
+    if active_learning and run_results:
+        ranked   = sorted(run_results, key=lambda r: r["entropy"], reverse=True)
+        to_label = ranked[:min(n_correct, len(ranked))]
+        for i, candidate in enumerate(to_label, start=1):
+            _active_learning_prompt(candidate, idx=i, total=len(to_label))
 
     print(f"\nDone.  Kept: {kept_count}  Discarded: {disc_count}")
     print(f"  Detections   → {OUT_DET}")
@@ -433,11 +454,12 @@ def run(
     print(f"  Scene graphs → {OUT_GRAPH}")
     print(f"  Point clouds → {OUT_CLOUD}")
     print(f"  Decisions    → {OUT_ACTION}")
+    print(f"  Entropy log  → {ROOT / 'data' / 'pipeline_output' / 'llm_actor_entropy.json'}")
     print(f"  Discarded    → {OUT_DISC}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Perception-to-decision pipeline")
+    parser = argparse.ArgumentParser(description="LLM-Actor perception-to-decision pipeline")
     parser.add_argument("--n",    type=int,   default=5,    help="Images to sample")
     parser.add_argument("--seed", type=int,   default=None, help="Random seed")
     parser.add_argument("--conf", type=float, default=0.25, help="Detection confidence threshold")
@@ -445,9 +467,28 @@ if __name__ == "__main__":
         "--learn",
         choices=("off", "auto", "interactive"),
         default="off",
-        help="Handle UNKNOWN labels: off (keep as UNKNOWN), "
-             "auto (GPT-4o-mini classifies), interactive (prompt user on stdin)",
+        help="Handle UNKNOWN labels: off / auto (GPT-4o-mini) / interactive (stdin)",
+    )
+    parser.add_argument(
+        "--active-learning",
+        action="store_true",
+        default=False,
+        help="After the run, prompt for corrections on the highest-entropy predictions",
+    )
+    parser.add_argument(
+        "--correct",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Number of high-entropy samples to correct in active-learning mode (default: 1)",
     )
     args = parser.parse_args()
 
-    run(n=args.n, seed=args.seed, conf=args.conf, learn=args.learn)
+    run(
+        n               = args.n,
+        seed            = args.seed,
+        conf            = args.conf,
+        learn           = args.learn,
+        active_learning = args.active_learning,
+        n_correct       = args.correct,
+    )

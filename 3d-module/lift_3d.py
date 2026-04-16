@@ -321,14 +321,8 @@ def build_scene_graph(
         mask = masks[i] if masks is not None and i < len(masks) else None
         cluster = get_object_cluster(depth_map, det, img_w, img_h, mask=mask)
 
-        # Robust to missing OR None values for depth_score
-        ds_raw = det.get("depth_score")
-        if ds_raw is None:
-            ds_raw = cluster["centroid_3d"][2]
-        try:
-            depth_score = float(ds_raw)
-        except (TypeError, ValueError):
-            depth_score = 0.5  # neutral fallback
+        _ds = det.get("depth_score")   # None for SURFACE detections
+        depth_score = float(_ds if _ds is not None else cluster["centroid_3d"][2])
         prox = det.get("proximity_label") or _proximity_label(depth_score)
         zone = det.get("path_zone") or _path_zone(cluster["box_2d"], img_w)
 
@@ -336,8 +330,8 @@ def build_scene_graph(
             id              = i + 1,
             label           = det.get("label", "unknown"),
             risk_group      = det.get("risk_group", "BACKGROUND"),
-            risk_score      = int(det.get("risk_score") or 1),
-            score           = float(det.get("score") or 0.0),
+            risk_score      = int(det.get("risk_score", 1)),
+            score           = float(det.get("score", 0.0)),
             depth_score     = depth_score,
             proximity_label = prox,
             path_zone       = zone,
