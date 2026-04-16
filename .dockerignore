@@ -1,0 +1,30 @@
+# ── Heavy files that should NOT be baked into the Docker image ────────────────
+# The training dataset is mounted as a Northflank Volume at runtime.
+
+data/challenge_projectbarcelona.zip
+data/pipeline_output/
+data/benchmark_output/
+predictions.json
+
+# Git / IDE
+.git/
+.github/
+.vscode/
+*.swp
+*.swo
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Model weights (will be generated during training)
+*.joblib
+*.pt
+*.pth
+*.onnx
+
+# OS
+.DS_Store
+Thumbs.db
