@@ -1,445 +1,1659 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ETHackers — Robot Vision Pipeline</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Navsense</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #0A0A0B;
+    --bg-dim:    #050506;
+    --glass:     rgba(14,14,18,0.55);
+    --glass-2:   rgba(18,18,22,0.72);
+    --stroke:    rgba(255,255,255,0.06);
+    --stroke-2:  rgba(255,255,255,0.10);
+    --text:      #FAFAFA;
+    --muted:     #A1A1AA;
+    --dim:       #52525B;
+    --hairline:  rgba(255,255,255,0.04);
+    --accent:    #00D4FF;
+    --accent-2:  #7C3AED;
+    --slate:     #94A3B8;
+    --emerald:   #10B981;
+    --amber:     #F59E0B;
+    --danger:    #EF4444;
+  }
+  *,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
+  html, body {
+    background: var(--bg);
+    color: var(--text);
+    height: 100%;
+  }
+  body {
+    font-family: "Geist", "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px; font-weight: 400; line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  .mono {
+    font-family: "Geist Mono", ui-monospace, "JetBrains Mono", monospace;
+    font-variant-numeric: tabular-nums;
+  }
 
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #0f1117;
-      color: #e2e8f0;
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-    }
+  /* ─────────── Fullscreen 3D background ─────────── */
+  #three-canvas {
+    position: fixed; inset: 0;
+    width: 100vw; height: 100vh;
+    z-index: 0;
+  }
+  /* ambient gradient (shown when 3D is empty) */
+  .ambient {
+    position: fixed; inset: 0; z-index: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(1200px circle at 15% 20%, rgba(0,212,255,0.08), transparent 60%),
+      radial-gradient(900px circle at 85% 10%, rgba(124,58,237,0.06), transparent 60%),
+      radial-gradient(800px circle at 50% 90%, rgba(0,212,255,0.04), transparent 55%);
+    opacity: 1;
+    transition: opacity 1.5s ease;
+  }
+  .ambient.dim { opacity: 0.35; }
+  .ambient::after {
+    content: "";
+    position: absolute; inset: 0;
+    background-image: radial-gradient(rgba(255,255,255,0.025) 1px, transparent 1px);
+    background-size: 32px 32px;
+    mask-image: radial-gradient(ellipse at center, black 40%, transparent 85%);
+  }
 
-    header {
-      padding: 20px 32px;
-      border-bottom: 1px solid #1e2535;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    header h1 { font-size: 18px; font-weight: 600; letter-spacing: -0.3px; }
-    header span { font-size: 13px; color: #64748b; }
-    .dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e;
-           box-shadow: 0 0 6px #22c55e; flex-shrink: 0; }
+  /* ─────────── Glass utility ─────────── */
+  .glass {
+    background: var(--glass);
+    backdrop-filter: blur(24px) saturate(140%);
+    -webkit-backdrop-filter: blur(24px) saturate(140%);
+    border: 1px solid var(--stroke);
+    border-radius: 16px;
+    box-shadow:
+      0 0 0 1px var(--hairline) inset,
+      0 30px 60px rgba(0,0,0,0.45),
+      0 8px 24px rgba(0,0,0,0.35);
+  }
 
-    main {
-      flex: 1;
-      display: grid;
-      grid-template-columns: 340px 1fr;
-      gap: 0;
-    }
+  /* ─────────── Top bar ─────────── */
+  .topbar {
+    position: fixed; top: 16px; left: 16px; right: 16px;
+    z-index: 30;
+    height: 52px;
+    padding: 0 16px;
+    display: flex; align-items: center; gap: 14px;
+    border-radius: 14px;
+    background: var(--glass);
+    backdrop-filter: blur(24px) saturate(140%);
+    -webkit-backdrop-filter: blur(24px) saturate(140%);
+    border: 1px solid var(--stroke);
+  }
+  .brand {
+    display: flex; align-items: center; gap: 10px;
+    font-weight: 600; font-size: 14.5px; letter-spacing: -0.2px;
+  }
+  .brand-logo {
+    width: 22px; height: 22px; border-radius: 7px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    position: relative; overflow: hidden;
+    box-shadow: 0 0 20px rgba(0,212,255,0.25);
+  }
+  .brand-logo::after {
+    content:""; position: absolute; inset: 2px; border-radius: 5px;
+    background: #050506;
+  }
+  .brand-logo::before {
+    content:""; position: absolute; inset: 7px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent);
+    animation: breathe 2.4s ease-in-out infinite;
+  }
+  @keyframes breathe {
+    0%,100% { opacity: 1; transform: scale(1); }
+    50%     { opacity: 0.55; transform: scale(0.82); }
+  }
+  .brand small {
+    font-size: 9.5px; font-weight: 500; color: var(--dim);
+    letter-spacing: 0.18em; text-transform: uppercase;
+    margin-left: 4px;
+  }
+  .spacer { flex: 1; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 6px 12px; border-radius: 999px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--stroke);
+    font-size: 11px; color: var(--muted);
+    letter-spacing: 0.04em;
+  }
+  .pill .sdot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--emerald); box-shadow: 0 0 8px var(--emerald);
+  }
+  .icon-btn {
+    background: transparent; border: 1px solid var(--stroke);
+    color: var(--muted);
+    padding: 7px 12px; border-radius: 10px; cursor: pointer;
+    font-size: 12px; font-weight: 500;
+    display: inline-flex; align-items: center; gap: 7px;
+    transition: all .15s;
+  }
+  .icon-btn:hover:not(:disabled) {
+    color: var(--text); border-color: var(--stroke-2);
+    background: rgba(255,255,255,0.03);
+  }
+  .icon-btn.danger { color: var(--danger); border-color: rgba(239,68,68,0.25); }
+  .icon-btn.danger:hover:not(:disabled) { background: rgba(239,68,68,0.08); border-color: var(--danger); }
+  .icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-    /* ── Left panel ── */
-    .panel {
-      border-right: 1px solid #1e2535;
-      padding: 28px 24px;
-      display: flex;
-      flex-direction: column;
-      gap: 28px;
-    }
+  /* ─────────── Idle hero ─────────── */
+  .hero {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    z-index: 15;
+    padding: 80px 24px;
+    transition: opacity .5s ease;
+  }
+  .hero.gone { opacity: 0; pointer-events: none; }
+  .hero-card {
+    width: 560px; max-width: 100%;
+    padding: 40px 36px;
+  }
+  .hero h1 {
+    font-size: 32px; font-weight: 600; letter-spacing: -0.8px;
+    margin-bottom: 8px;
+  }
+  .hero .tagline { color: var(--muted); font-size: 14px; margin-bottom: 28px; }
+  #drop-zone {
+    border: 1px dashed var(--stroke-2);
+    border-radius: 14px; padding: 40px 20px;
+    cursor: pointer; position: relative;
+    transition: border-color .2s, background .2s;
+  }
+  #drop-zone:hover, #drop-zone.dragover {
+    border-color: var(--accent);
+    background: rgba(0,212,255,0.03);
+  }
+  #drop-zone input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  .dz-icon {
+    width: 44px; height: 44px; margin: 0 auto 14px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, rgba(0,212,255,0.12), rgba(124,58,237,0.12));
+    border: 1px solid var(--stroke-2);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; color: var(--accent);
+  }
+  .dz-title { font-weight: 500; text-align: center; }
+  .dz-hint  { text-align: center; color: var(--dim); font-size: 11.5px; margin-top: 4px; letter-spacing: 0.02em; }
+  #preview-wrap { display: none; align-items: center; gap: 14px; justify-content: center; }
+  #preview-img { height: 56px; border-radius: 8px; border: 1px solid var(--stroke); }
+  #preview-name { font-size: 13px; font-weight: 500; }
+  #change-btn {
+    font-size: 11px; color: var(--accent); background: none; border: none;
+    cursor: pointer; letter-spacing: 0.02em; padding: 0; margin-top: 2px;
+  }
 
-    .section-label {
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: #64748b;
-      margin-bottom: 12px;
-    }
+  /* ─────────── Sidebars ─────────── */
+  .sidebar {
+    position: fixed; top: 84px; bottom: 100px;
+    width: 260px;
+    z-index: 20;
+    display: flex; flex-direction: column; gap: 12px;
+    padding: 14px;
+    overflow-y: auto;
+    transition: transform .35s cubic-bezier(0.2, 0.8, 0.2, 1), opacity .25s;
+  }
+  .sidebar.left  { left: 16px; }
+  .sidebar.right { right: 16px; }
+  .sidebar.hidden.left  { transform: translateX(-110%); opacity: 0; }
+  .sidebar.hidden.right { transform: translateX( 110%); opacity: 0; }
 
-    /* Upload zone */
-    #drop-zone {
-      border: 2px dashed #2d3748;
-      border-radius: 10px;
-      padding: 32px 16px;
-      text-align: center;
-      cursor: pointer;
-      transition: border-color 0.2s, background 0.2s;
-      position: relative;
-    }
-    #drop-zone:hover, #drop-zone.dragover {
-      border-color: #3b82f6;
-      background: rgba(59,130,246,0.05);
-    }
-    #drop-zone input[type="file"] {
-      position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
-    }
-    #drop-zone .icon { font-size: 32px; margin-bottom: 10px; }
-    #drop-zone p { font-size: 13px; color: #94a3b8; line-height: 1.5; }
-    #drop-zone p strong { color: #cbd5e1; }
+  .sb-section-title {
+    font-size: 10px; font-weight: 600; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--dim);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .sb-section-title .meta { color: var(--muted); font-weight: 500; letter-spacing: 0.02em; text-transform: none; }
 
-    #preview-wrap { display: none; flex-direction: column; align-items: center; gap: 8px; }
-    #preview-img  { max-height: 140px; border-radius: 6px; border: 1px solid #2d3748; }
-    #preview-name { font-size: 12px; color: #64748b; }
-    #change-btn   {
-      font-size: 11px; color: #3b82f6; background: none; border: none;
-      cursor: pointer; text-decoration: underline;
-    }
+  /* Collapse handles on viewport edges */
+  .sb-toggle {
+    position: fixed; top: 50%; transform: translateY(-50%);
+    width: 28px; height: 52px; z-index: 21;
+    background: var(--glass);
+    backdrop-filter: blur(18px) saturate(140%);
+    -webkit-backdrop-filter: blur(18px) saturate(140%);
+    border: 1px solid var(--stroke);
+    color: var(--muted); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px;
+    transition: all .2s;
+  }
+  .sb-toggle:hover { color: var(--text); border-color: var(--stroke-2); }
+  .sb-toggle.left  { left: 0; border-left: none; border-radius: 0 10px 10px 0; }
+  .sb-toggle.right { right: 0; border-right: none; border-radius: 10px 0 0 10px; }
 
-    /* Pipeline stages */
-    .stage {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 12px 14px;
-      border-radius: 8px;
-      border: 1px solid #1e2535;
-      cursor: pointer;
-      transition: border-color 0.15s, background 0.15s;
-      user-select: none;
-    }
-    .stage:hover:not(.disabled) { border-color: #3b82f6; background: rgba(59,130,246,0.04); }
-    .stage.selected  { border-color: #3b82f6; background: rgba(59,130,246,0.08); }
-    .stage.disabled  { opacity: 0.38; cursor: not-allowed; }
+  /* Sidebar card (glass inside sidebar) */
+  .sbcard {
+    background: var(--glass-2);
+    backdrop-filter: blur(20px) saturate(140%);
+    -webkit-backdrop-filter: blur(20px) saturate(140%);
+    border: 1px solid var(--stroke);
+    border-radius: 14px; padding: 12px;
+    box-shadow: 0 0 0 1px var(--hairline) inset, 0 20px 40px rgba(0,0,0,0.35);
+  }
 
-    .stage-check {
-      width: 18px; height: 18px; border-radius: 4px;
-      border: 2px solid #2d3748; flex-shrink: 0;
-      display: flex; align-items: center; justify-content: center;
-      transition: background 0.15s, border-color 0.15s;
-    }
-    .stage.selected .stage-check { background: #3b82f6; border-color: #3b82f6; }
-    .stage-check svg { display: none; }
-    .stage.selected .stage-check svg { display: block; }
+  /* Input thumbnail */
+  .input-img-wrap {
+    margin-top: 10px; border-radius: 10px; overflow: hidden;
+    border: 1px solid var(--stroke);
+  }
+  .input-img-wrap img { width: 100%; display: block; }
 
-    .stage-info { flex: 1; }
-    .stage-info .name  { font-size: 14px; font-weight: 500; }
-    .stage-info .desc  { font-size: 12px; color: #64748b; margin-top: 2px; }
+  /* Stage thumbs */
+  .view-switch {
+    display: flex; gap: 6px; margin-top: 10px;
+    padding: 3px; border-radius: 10px;
+    background: rgba(255,255,255,0.03); border: 1px solid var(--stroke);
+  }
+  .vs-btn {
+    flex: 1; background: transparent; border: none;
+    color: var(--muted); font-size: 11px; font-weight: 500;
+    padding: 6px 8px; border-radius: 8px; cursor: pointer;
+    transition: .15s; letter-spacing: 0.02em;
+  }
+  .vs-btn:hover:not(:disabled) { color: var(--text); }
+  .vs-btn.active {
+    background: rgba(0,212,255,0.08); color: var(--accent);
+    box-shadow: 0 0 0 1px rgba(0,212,255,0.2) inset;
+  }
+  .vs-btn:disabled { opacity: .4; cursor: not-allowed; }
 
-    .badge {
-      font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 20px;
-      letter-spacing: 0.04em; flex-shrink: 0;
-    }
-    .badge.ready  { background: rgba(34,197,94,0.12); color: #22c55e; }
-    .badge.soon   { background: rgba(100,116,139,0.12); color: #64748b; }
+  .stage-thumbs {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+    margin-top: 10px;
+  }
+  .thumb {
+    position: relative; aspect-ratio: 16/10;
+    border-radius: 12px; overflow: hidden;
+    background: rgba(255,255,255,0.02);
+    border: 1px solid var(--stroke);
+    cursor: pointer;
+    opacity: 0; transform: translateY(4px) scale(0.98);
+    transition: opacity .4s ease, transform .4s ease, border-color .2s, box-shadow .2s;
+  }
+  .thumb.on { opacity: 1; transform: translateY(0) scale(1); }
+  .thumb:hover { border-color: var(--accent); }
+  .thumb.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 0 20px rgba(0,212,255,0.25); }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb .tag {
+    position: absolute; inset: 0;
+    display: flex; align-items: flex-end; padding: 6px 8px;
+    background: linear-gradient(to top, rgba(0,0,0,0.75), transparent 60%);
+    color: #fff; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.04em;
+    opacity: 0; transition: opacity .2s;
+  }
+  .thumb:hover .tag { opacity: 1; }
 
-    /* Colormap selector */
-    .colormap-row {
-      display: flex; gap: 8px; flex-wrap: wrap;
-    }
-    .cm-btn {
-      padding: 5px 12px; border-radius: 6px; border: 1px solid #2d3748;
-      background: none; color: #94a3b8; font-size: 12px; cursor: pointer;
-      transition: all 0.15s;
-    }
-    .cm-btn:hover    { border-color: #3b82f6; color: #e2e8f0; }
-    .cm-btn.active   { border-color: #3b82f6; background: rgba(59,130,246,0.1); color: #e2e8f0; }
+  /* Entities */
+  .entity-list { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+  .entity {
+    display: flex; align-items: stretch; gap: 10px;
+    padding: 9px 10px; border-radius: 10px;
+    cursor: default; font-size: 12.5px;
+    border: 1px solid transparent;
+    opacity: 0; transform: translateX(8px);
+    animation: slideIn .5s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+  }
+  @keyframes slideIn { to { opacity: 1; transform: translateX(0); } }
+  .entity:hover { background: rgba(255,255,255,0.03); border-color: var(--stroke); }
+  .entity.selected { background: rgba(0,212,255,0.06); border-color: rgba(0,212,255,0.35); }
+  .entity .bar {
+    width: 3px; border-radius: 2px; align-self: stretch;
+    flex-shrink: 0;
+  }
+  .entity .bar.CLOSE  { background: var(--amber);   box-shadow: 0 0 8px var(--amber); }
+  .entity .bar.MEDIUM { background: var(--slate); }
+  .entity .bar.FAR    { background: var(--emerald); box-shadow: 0 0 6px rgba(16,185,129,0.3); }
+  .entity .e-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .entity .e-name {
+    font-weight: 500; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .entity .e-meta {
+    color: var(--dim); font-size: 10.5px; letter-spacing: 0.04em;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .entity .e-meta .group {
+    font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.08em;
+  }
+  .entity .e-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+    margin-top: 4px;
+    box-shadow: 0 0 8px currentColor;
+  }
 
-    /* Run button */
-    #run-btn {
-      width: 100%; padding: 12px;
-      background: #3b82f6; color: white;
-      border: none; border-radius: 8px;
-      font-size: 14px; font-weight: 600; cursor: pointer;
-      transition: background 0.15s, opacity 0.15s;
-      display: flex; align-items: center; justify-content: center; gap: 8px;
-    }
-    #run-btn:hover:not(:disabled) { background: #2563eb; }
-    #run-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  /* Scene graph */
+  .scene-text {
+    margin-top: 10px; padding: 12px 14px; max-height: 240px; overflow-y: auto;
+    border-radius: 10px; background: rgba(255,255,255,0.02);
+    border: 1px solid var(--stroke);
+    font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 11px; line-height: 1.65;
+    color: var(--muted); white-space: pre-wrap;
+  }
+  .scene-text .hl { color: var(--accent); }
 
-    .spinner {
-      width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3);
-      border-top-color: white; border-radius: 50%;
-      animation: spin 0.7s linear infinite; display: none;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
+  /* Placeholder in panels */
+  .placeholder {
+    padding: 16px 10px; color: var(--dim); font-size: 12px;
+    text-align: center;
+  }
 
-    /* ── Right panel (results) ── */
-    .results {
-      padding: 28px 32px;
-      display: flex;
-      flex-direction: column;
-      gap: 24px;
-    }
+  /* ─────────── Bottom command bar ─────────── */
+  .cmdbar {
+    position: fixed; left: 50%; bottom: 20px;
+    transform: translateX(-50%);
+    z-index: 30;
+    min-width: 640px; max-width: calc(100vw - 40px);
+    padding: 10px 12px;
+    display: flex; align-items: center; gap: 14px;
+    border-radius: 16px;
+    background: var(--glass);
+    backdrop-filter: blur(24px) saturate(140%);
+    -webkit-backdrop-filter: blur(24px) saturate(140%);
+    border: 1px solid var(--stroke);
+    box-shadow:
+      0 0 0 1px var(--hairline) inset,
+      0 30px 60px rgba(0,0,0,0.5),
+      0 0 80px rgba(0,212,255,0.03);
+  }
+  .cmd-section { display: flex; align-items: center; gap: 8px; }
 
-    .empty-state {
-      flex: 1; display: flex; flex-direction: column;
-      align-items: center; justify-content: center;
-      gap: 12px; color: #334155;
-    }
-    .empty-state .big-icon { font-size: 48px; }
-    .empty-state p { font-size: 14px; }
+  /* Mini timeline */
+  .mini-timeline { display: flex; align-items: center; gap: 0; flex: 1; min-width: 0; }
+  .mt-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: rgba(255,255,255,0.08);
+    position: relative;
+    transition: all .3s;
+    flex-shrink: 0;
+  }
+  .mt-dot.active {
+    background: var(--accent);
+    box-shadow: 0 0 0 3px rgba(0,212,255,0.15), 0 0 14px rgba(0,212,255,0.7);
+    animation: breathe 1.6s ease-in-out infinite;
+  }
+  .mt-dot.ok    { background: var(--emerald); box-shadow: 0 0 6px rgba(16,185,129,0.35); }
+  .mt-dot.error { background: var(--danger); }
+  .mt-dot .tip {
+    position: absolute; bottom: calc(100% + 8px); left: 50%;
+    transform: translateX(-50%);
+    background: var(--glass-2); border: 1px solid var(--stroke);
+    padding: 4px 8px; border-radius: 6px;
+    font-size: 10.5px; color: var(--text);
+    white-space: nowrap;
+    opacity: 0; pointer-events: none;
+    transition: opacity .15s;
+  }
+  .mt-dot:hover .tip { opacity: 1; }
+  .mt-line { flex: 1; height: 1px; background: rgba(255,255,255,0.06); }
+  .mt-line.ok { background: linear-gradient(90deg, var(--emerald), var(--emerald)); opacity: 0.4; }
 
-    .result-block { display: flex; flex-direction: column; gap: 12px; }
-    .result-block .result-label {
-      font-size: 11px; font-weight: 600; text-transform: uppercase;
-      letter-spacing: 0.08em; color: #64748b;
-    }
+  /* Run FAB */
+  .run-btn {
+    padding: 9px 18px;
+    background: linear-gradient(135deg, var(--accent), #0099cc);
+    color: #00131a; font-weight: 600; font-size: 13px;
+    border: none; border-radius: 12px;
+    cursor: pointer; letter-spacing: 0.01em;
+    display: inline-flex; align-items: center; gap: 8px;
+    box-shadow:
+      0 0 0 1px rgba(0,212,255,0.4),
+      0 10px 30px rgba(0,212,255,0.28);
+    transition: all .15s;
+  }
+  .run-btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 0 0 1px rgba(0,212,255,0.55), 0 16px 40px rgba(0,212,255,0.42);
+  }
+  .run-btn:disabled { opacity: 0.35; cursor: not-allowed; box-shadow: none; }
+  .run-btn .mini-spin {
+    width: 12px; height: 12px; border: 1.5px solid rgba(0,19,26,0.3);
+    border-top-color: #00131a; border-radius: 50%;
+    animation: spin .7s linear infinite; display: none;
+  }
+  .run-btn.running .mini-spin { display: block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
-    .image-row {
-      display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
-    }
-    .image-card {
-      background: #161b27; border: 1px solid #1e2535; border-radius: 8px;
-      overflow: hidden;
-    }
-    .image-card .card-label {
-      padding: 8px 12px; font-size: 11px; color: #64748b; border-bottom: 1px solid #1e2535;
-    }
-    .image-card img { width: 100%; display: block; }
+  /* Toggle pills in cmdbar */
+  .cmd-toggle {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 12px; border-radius: 999px;
+    font-size: 11px; color: var(--muted); cursor: pointer;
+    border: 1px solid var(--stroke);
+    background: rgba(255,255,255,0.02);
+    user-select: none; transition: .15s;
+  }
+  .cmd-toggle:hover { color: var(--text); }
+  .cmd-toggle.on {
+    color: var(--accent);
+    background: rgba(0,212,255,0.05);
+    border-color: rgba(0,212,255,0.35);
+  }
+  .cmd-toggle input { display: none; }
+  .cmd-toggle .dotcb {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--dim); transition: .15s;
+  }
+  .cmd-toggle.on .dotcb {
+    background: var(--accent); box-shadow: 0 0 8px var(--accent);
+  }
 
-    .error-box {
-      background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.25);
-      border-radius: 8px; padding: 14px 16px; font-size: 13px; color: #fca5a5;
-    }
-  </style>
+  .divider { width: 1px; height: 22px; background: var(--stroke); }
+
+  /* Stage label floating on canvas */
+  .stage-badge {
+    position: fixed; top: 84px; left: 50%; transform: translateX(-50%);
+    z-index: 15;
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 7px 14px; border-radius: 999px;
+    background: var(--glass-2);
+    backdrop-filter: blur(20px) saturate(140%);
+    -webkit-backdrop-filter: blur(20px) saturate(140%);
+    border: 1px solid var(--stroke);
+    font-size: 10.5px; font-weight: 600; letter-spacing: 0.14em;
+    text-transform: uppercase;
+    opacity: 0; transition: opacity .3s, transform .3s;
+  }
+  .stage-badge.on { opacity: 1; }
+  .stage-badge .sb-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent); box-shadow: 0 0 10px var(--accent);
+    animation: breathe 1.8s ease-in-out infinite;
+  }
+
+  /* Compositor (center 2D stage) */
+  .compositor {
+    position: fixed; top: 110px; bottom: 110px;
+    left: 50%; transform: translateX(-50%);
+    width: min(1020px, calc(100vw - 600px));
+    z-index: 10;
+    border-radius: 16px; overflow: hidden;
+    background: rgba(5,5,6,0.55);
+    backdrop-filter: blur(20px) saturate(140%);
+    -webkit-backdrop-filter: blur(20px) saturate(140%);
+    border: 1px solid var(--stroke);
+    box-shadow: 0 0 0 1px var(--hairline) inset, 0 30px 80px rgba(0,0,0,0.55);
+    opacity: 0; transition: opacity .6s ease, transform .6s ease;
+    pointer-events: none;
+  }
+  .compositor.on { opacity: 1; pointer-events: auto; }
+  .compositor.gone { opacity: 0; transform: translate(-50%, 12px) scale(0.97); }
+  .comp-layer {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%; object-fit: contain;
+    opacity: 0;
+    transition: opacity 1.2s cubic-bezier(0.4, 0, 0.2, 1);
+    pointer-events: none;
+  }
+  .comp-layer.on { opacity: 1; }
+  .scan-line { position: absolute; inset: 0; pointer-events: none; opacity: 0; transition: opacity .3s; }
+  .scan-line.on { opacity: 1; }
+  .scan-line::before {
+    content:""; position: absolute; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent) 50%, transparent);
+    top: 0;
+    box-shadow: 0 0 20px rgba(0,212,255,0.6);
+    animation: scan 2.4s ease-in-out infinite;
+  }
+  @keyframes scan {
+    0%   { top: 0%;   opacity: 0; }
+    10%  { opacity: 1; }
+    90%  { opacity: 1; }
+    100% { top: 100%; opacity: 0; }
+  }
+
+  /* 3D click popover */
+  .popover {
+    position: fixed; z-index: 18;
+    min-width: 180px; max-width: 240px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: var(--glass-2);
+    backdrop-filter: blur(20px) saturate(140%);
+    -webkit-backdrop-filter: blur(20px) saturate(140%);
+    border: 1px solid var(--stroke);
+    box-shadow: 0 0 0 1px var(--hairline) inset, 0 16px 40px rgba(0,0,0,0.5);
+    opacity: 0; transform: translate(-50%, -110%) translateY(6px) scale(0.95);
+    transform-origin: center bottom;
+    transition: opacity .2s, transform .2s;
+    pointer-events: none;
+  }
+  .popover.on { opacity: 1; transform: translate(-50%, -110%) scale(1); }
+  .popover::after {
+    content: ""; position: absolute; left: 50%; top: 100%;
+    transform: translateX(-50%);
+    border: 6px solid transparent; border-top-color: rgba(14,14,18,0.85);
+  }
+  .pop-name { font-size: 13px; font-weight: 500; color: var(--text); }
+  .pop-meta {
+    display: flex; flex-wrap: wrap; gap: 4px 10px;
+    margin-top: 6px; font-size: 10.5px; color: var(--muted);
+  }
+  .pop-meta span b { color: var(--text); font-weight: 500; }
+  .pop-chip {
+    font-size: 9.5px; padding: 2px 7px; border-radius: 999px; font-weight: 600;
+    letter-spacing: 0.06em;
+  }
+  .pop-chip.CLOSE  { color: var(--amber);   background: rgba(245,158,11,0.12); }
+  .pop-chip.MEDIUM { color: var(--slate);   background: rgba(148,163,184,0.12); }
+  .pop-chip.FAR    { color: var(--emerald); background: rgba(16,185,129,0.12); }
+
+  /* Decision banner (glass, floats near bottom cmdbar) */
+  .decision {
+    position: fixed; left: 50%; bottom: 92px;
+    transform: translate(-50%, 24px);
+    z-index: 25;
+    min-width: 540px; max-width: calc(100vw - 560px);
+    padding: 16px 22px;
+    border-radius: 16px;
+    background: var(--glass-2);
+    backdrop-filter: blur(24px) saturate(140%);
+    -webkit-backdrop-filter: blur(24px) saturate(140%);
+    border: 1px solid var(--stroke);
+    box-shadow: 0 0 0 1px var(--hairline) inset, 0 30px 60px rgba(0,0,0,0.55);
+    display: flex; gap: 24px; align-items: stretch;
+    opacity: 0;
+    transition: opacity .7s cubic-bezier(0.2, 0.8, 0.2, 1),
+                transform .7s cubic-bezier(0.2, 0.8, 0.2, 1),
+                box-shadow .4s;
+  }
+  .decision.on { opacity: 1; transform: translate(-50%, 0); }
+  .decision .d-col { display: flex; flex-direction: column; gap: 6px; }
+  .decision .d-col.reasons-col { border-left: 1px solid var(--stroke); padding-left: 22px; flex: 1; min-width: 0; }
+  .decision .d-label {
+    font-size: 9.5px; font-weight: 600; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--dim);
+  }
+  .decision .d-big {
+    font-size: 32px; font-weight: 600; letter-spacing: -1px;
+    line-height: 1;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .decision .d-big::before {
+    content:""; width: 8px; height: 8px; border-radius: 50%;
+    background: currentColor; box-shadow: 0 0 16px currentColor;
+    animation: breathe 1.8s ease-in-out infinite;
+  }
+  .decision .d-desc {
+    color: var(--muted); font-size: 11.5px; line-height: 1.55;
+    max-width: 280px;
+  }
+  .decision .d-desc b { color: var(--text); font-weight: 500; }
+  .decision .d-reasons {
+    color: var(--muted); font-size: 12px; line-height: 1.6;
+    list-style: none; padding: 0; margin: 0;
+  }
+  .decision .d-reasons li {
+    position: relative; padding-left: 14px;
+  }
+  .decision .d-reasons li::before {
+    content: "→"; position: absolute; left: 0; color: var(--accent);
+  }
+  .d-rules { margin-top: 6px; }
+  .d-rules summary {
+    cursor: pointer; user-select: none; font-size: 10.5px; color: var(--muted);
+    display: flex; align-items: center; gap: 6px;
+    letter-spacing: 0.04em; padding: 4px 0;
+  }
+  .d-rules summary::-webkit-details-marker { display: none; }
+  .d-rules summary::before { content: "+"; color: var(--accent); font-weight: 600; }
+  .d-rules[open] summary::before { content: "−"; }
+  .rule-grid {
+    display: flex; flex-direction: column; gap: 6px;
+    margin-top: 6px; padding: 10px 12px;
+    background: rgba(255,255,255,0.02); border: 1px solid var(--stroke);
+    border-radius: 10px;
+    font-size: 11px; color: var(--muted); line-height: 1.5;
+  }
+  .rule { display: flex; gap: 10px; align-items: flex-start; }
+  .rule b { color: var(--text); font-weight: 500; }
+  .rule .tag {
+    font-size: 9.5px; padding: 2px 6px; border-radius: 4px; font-weight: 600;
+    letter-spacing: 0.06em; flex-shrink: 0;
+  }
+  .rule .tag.STOP     { color: var(--danger);  background: rgba(239,68,68,0.12); }
+  .rule .tag.SLOW     { color: var(--amber);   background: rgba(245,158,11,0.12); }
+  .rule .tag.CONTINUE { color: var(--emerald); background: rgba(16,185,129,0.12); }
+
+  /* JSON drawer */
+  .drawer {
+    position: fixed; right: 16px; bottom: 100px;
+    z-index: 28;
+    width: 560px; max-width: calc(100vw - 32px); max-height: 70vh;
+    transform: translateY(calc(100% + 40px));
+    transition: transform .35s cubic-bezier(0.2, 0.8, 0.2, 1);
+    pointer-events: none;
+  }
+  .drawer.on { transform: translateY(0); pointer-events: auto; }
+  .drawer-head {
+    padding: 12px 16px; border-bottom: 1px solid var(--stroke);
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 10px; font-weight: 600; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--dim);
+  }
+  .drawer-head button {
+    background: none; border: none; color: var(--muted);
+    cursor: pointer; font-size: 14px; padding: 0 4px;
+  }
+  .json-tabs {
+    display: flex; gap: 4px; padding: 10px 12px;
+    border-bottom: 1px solid var(--stroke); overflow-x: auto;
+  }
+  .json-tab {
+    padding: 5px 10px; border-radius: 6px;
+    background: transparent; border: 1px solid var(--stroke);
+    color: var(--muted); font-size: 10.5px; cursor: pointer;
+    font-family: "Geist Mono", monospace;
+    white-space: nowrap; transition: .15s;
+  }
+  .json-tab:hover { color: var(--text); border-color: var(--stroke-2); }
+  .json-tab.active {
+    background: rgba(0,212,255,0.08); color: var(--accent);
+    border-color: rgba(0,212,255,0.35);
+  }
+  .json-body {
+    padding: 14px 18px; max-height: 380px; overflow: auto;
+    font-family: "Geist Mono", monospace; font-size: 11px;
+    line-height: 1.6; color: var(--muted);
+    white-space: pre-wrap; word-break: break-word;
+  }
+
+  /* Scrollbars */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.14); }
+
+  @media (max-width: 1100px) {
+    .compositor { width: calc(100vw - 80px); }
+    .sidebar { width: 220px; }
+  }
+  @media (max-width: 860px) {
+    .sidebar.left { display: none; }
+    .sidebar.right { display: none; }
+    .compositor { width: calc(100vw - 32px); }
+  }
+</style>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
 </head>
+
 <body>
 
-<header>
-  <div class="dot"></div>
-  <h1>Robot Vision Pipeline</h1>
-  <span>ETHackers · Barcelona 2025</span>
-</header>
+<!-- Hero 3D scene background -->
+<canvas id="three-canvas"></canvas>
+<div class="ambient" id="ambient"></div>
 
-<main>
-
-  <!-- ── Left panel ── -->
-  <div class="panel">
-
-    <!-- Upload -->
-    <div>
-      <div class="section-label">Image</div>
-      <div id="drop-zone">
-        <input type="file" id="file-input" accept="image/*" />
-        <div id="upload-prompt">
-          <div class="icon">🖼️</div>
-          <p><strong>Click or drag</strong> an image here</p>
-          <p>JPG, PNG, WEBP</p>
-        </div>
-        <div id="preview-wrap">
-          <img id="preview-img" src="" alt="preview" />
-          <span id="preview-name"></span>
-          <button id="change-btn" onclick="clearImage(event)">Change image</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Pipeline stages -->
-    <div>
-      <div class="section-label">Pipeline stages</div>
-      <div style="display:flex;flex-direction:column;gap:8px;">
-
-        <div class="stage selected" data-stage="depth" onclick="toggleStage(this)">
-          <div class="stage-check">
-            <svg width="10" height="8" viewBox="0 0 10 8" fill="none">
-              <path d="M1 4L3.5 6.5L9 1" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
-            </svg>
-          </div>
-          <div class="stage-info">
-            <div class="name">Depth Estimation</div>
-            <div class="desc">Depth Anything V2 — proximity + path zone</div>
-          </div>
-          <span class="badge ready">Ready</span>
-        </div>
-
-        <div class="stage disabled" data-stage="detection">
-          <div class="stage-check"></div>
-          <div class="stage-info">
-            <div class="name">Detection</div>
-            <div class="desc">Object detection + bounding boxes</div>
-          </div>
-          <span class="badge soon">Soon</span>
-        </div>
-
-        <div class="stage disabled" data-stage="filtering">
-          <div class="stage-check"></div>
-          <div class="stage-info">
-            <div class="name">Filtering</div>
-            <div class="desc">Deduplicate + clean noisy detections</div>
-          </div>
-          <span class="badge soon">Soon</span>
-        </div>
-
-        <div class="stage disabled" data-stage="decision">
-          <div class="stage-check"></div>
-          <div class="stage-info">
-            <div class="name">Decision</div>
-            <div class="desc">STOP / SLOW / CONTINUE + reasoning</div>
-          </div>
-          <span class="badge soon">Soon</span>
-        </div>
-
-      </div>
-    </div>
-
-    <!-- Colormap (only relevant when depth is selected) -->
-    <div id="colormap-section">
-      <div class="section-label">Depth colormap</div>
-      <div class="colormap-row">
-        <button class="cm-btn active" data-cm="inferno"  onclick="selectCm(this)">Inferno</button>
-        <button class="cm-btn"        data-cm="magma"    onclick="selectCm(this)">Magma</button>
-        <button class="cm-btn"        data-cm="plasma"   onclick="selectCm(this)">Plasma</button>
-        <button class="cm-btn"        data-cm="viridis"  onclick="selectCm(this)">Viridis</button>
-        <button class="cm-btn"        data-cm="jet"      onclick="selectCm(this)">Jet</button>
-      </div>
-    </div>
-
-    <!-- Run -->
-    <button id="run-btn" onclick="run()" disabled>
-      <div class="spinner" id="spinner"></div>
-      <span id="run-label">Run pipeline</span>
-    </button>
-
+<!-- Top bar -->
+<div class="topbar">
+  <div class="brand">
+    <div class="brand-logo"></div>
+    <span>navsense<small>vision · v0.1</small></span>
   </div>
+  <div class="spacer"></div>
+  <div class="pill"><span class="sdot"></span><span id="status-text">ready</span></div>
+  <button class="icon-btn" id="new-btn" onclick="newImage()" style="display:none;">New image</button>
+  <button class="icon-btn danger" id="cancel-btn" onclick="cancelRun()" style="display:none;">Cancel</button>
+  <button class="icon-btn" id="json-btn" onclick="toggleDrawer()" style="display:none;">⋯ outputs</button>
+</div>
 
-  <!-- ── Right panel ── -->
-  <div class="results" id="results">
-    <div class="empty-state">
-      <div class="big-icon">🤖</div>
-      <p>Upload an image and select pipeline stages to get started.</p>
+<!-- Sidebar toggle handles -->
+<button class="sb-toggle left"  id="sbt-l" onclick="toggleSidebar('left')" title="Toggle left panel">‹</button>
+<button class="sb-toggle right" id="sbt-r" onclick="toggleSidebar('right')" title="Toggle right panel">›</button>
+
+<!-- Idle hero -->
+<div class="hero" id="hero">
+  <div class="hero-card glass">
+    <h1>Navsense</h1>
+    <div class="tagline">Upload a scene. Detection, depth, 3D lift, decision — end-to-end.</div>
+    <div id="drop-zone">
+      <input type="file" id="file-input" accept="image/*" />
+      <div id="upload-prompt">
+        <div class="dz-icon">↑</div>
+        <div class="dz-title">Drop an image or click to browse</div>
+        <div class="dz-hint">JPG · PNG · WEBP</div>
+      </div>
+      <div id="preview-wrap">
+        <img id="preview-img" />
+        <div>
+          <div id="preview-name"></div>
+          <button id="change-btn" onclick="clearImage(event)">Replace</button>
+        </div>
+      </div>
     </div>
   </div>
+</div>
 
-</main>
+<!-- Left sidebar -->
+<div class="sidebar left hidden" id="sidebar-left">
+  <div class="sbcard">
+    <div class="sb-section-title">
+      <span>Input</span>
+      <span class="meta mono" id="input-dims"></span>
+    </div>
+    <div class="input-img-wrap"><img id="left-original" /></div>
+  </div>
 
-<script>
-  let selectedFile = null;
-  let selectedCm   = "inferno";
+  <div class="sbcard">
+    <div class="sb-section-title"><span>View</span></div>
+    <div class="view-switch">
+      <button class="vs-btn active" id="vs-stages" onclick="showStagesView()">Stages</button>
+      <button class="vs-btn"        id="vs-3d"     onclick="show3D()" disabled>3D map</button>
+    </div>
+    <div class="stage-thumbs" id="stage-thumbs"></div>
+  </div>
+</div>
 
-  // ── File handling ──────────────────────────────────────────────────────────
+<!-- Right sidebar -->
+<div class="sidebar right hidden" id="sidebar-right">
+  <div class="sbcard">
+    <div class="sb-section-title">
+      <span>Entities</span>
+      <span class="meta mono" id="entity-count">0</span>
+    </div>
+    <div class="entity-list" id="entity-list">
+      <div class="placeholder">Awaiting detections</div>
+    </div>
+  </div>
+  <div class="sbcard">
+    <div class="sb-section-title"><span>Scene graph</span></div>
+    <div class="scene-text" id="scene-text">
+      <div class="placeholder">Runs after 3D lift</div>
+    </div>
+  </div>
+</div>
 
-  const dropZone   = document.getElementById("drop-zone");
-  const fileInput  = document.getElementById("file-input");
-  const uploadPmpt = document.getElementById("upload-prompt");
-  const previewWrp = document.getElementById("preview-wrap");
-  const previewImg = document.getElementById("preview-img");
-  const previewNm  = document.getElementById("preview-name");
-  const runBtn     = document.getElementById("run-btn");
+<!-- Center stage compositor (visible only during pre-processing) -->
+<div class="compositor" id="compositor">
+  <div class="scan-line" id="scan-line"></div>
+</div>
 
-  fileInput.addEventListener("change", e => setFile(e.target.files[0]));
+<!-- Stage label above compositor/3D -->
+<div class="stage-badge" id="stage-badge">
+  <span class="sb-dot"></span>
+  <span id="stage-badge-text">INITIALIZING</span>
+</div>
 
-  dropZone.addEventListener("dragover",  e => { e.preventDefault(); dropZone.classList.add("dragover"); });
-  dropZone.addEventListener("dragleave", ()  => dropZone.classList.remove("dragover"));
-  dropZone.addEventListener("drop", e => {
+<!-- 3D click popover -->
+<div class="popover" id="popover"></div>
+
+<!-- Decision banner -->
+<div class="decision" id="decision">
+  <div class="d-col">
+    <div class="d-label">Decision</div>
+    <div class="d-big" id="decision-big">—</div>
+    <div class="d-desc">
+      The <b>critic</b> inspects every enriched detection — risk group, fused proximity,
+      path zone — and outputs a verdict for the low-level controller.
+    </div>
+  </div>
+  <div class="d-col reasons-col">
+    <div class="d-label">Rules triggered</div>
+    <ul class="d-reasons" id="decision-reasons"></ul>
+    <details class="d-rules">
+      <summary>View decision policy</summary>
+      <div class="rule-grid">
+        <div class="rule"><span class="tag STOP">STOP</span><div><b>HUMAN / VEHICLE · CLOSE · CENTER</b> path</div></div>
+        <div class="rule"><span class="tag SLOW">SLOW</span><div>Any object <b>CLOSE</b> in the <b>CENTER</b> path, or high-risk object CLOSE peripherally</div></div>
+        <div class="rule"><span class="tag CONTINUE">CONTINUE</span><div>No close obstacles in the forward path</div></div>
+      </div>
+    </details>
+  </div>
+</div>
+
+<!-- Bottom command bar -->
+<div class="cmdbar" id="cmdbar">
+  <div class="cmd-section mini-timeline" id="mini-timeline"></div>
+  <div class="divider"></div>
+  <div class="cmd-section">
+    <label class="cmd-toggle on" id="tg-gdino">
+      <input type="checkbox" checked />
+      <span class="dotcb"></span>
+      <span>G-DINO</span>
+    </label>
+    <label class="cmd-toggle on" id="tg-sam">
+      <input type="checkbox" checked />
+      <span class="dotcb"></span>
+      <span>SAM 2</span>
+    </label>
+  </div>
+  <div class="divider"></div>
+  <button class="run-btn" id="run-btn" onclick="run()" disabled>
+    <div class="mini-spin"></div>
+    <span id="run-label">Run pipeline</span>
+  </button>
+</div>
+
+<!-- JSON drawer -->
+<div class="drawer glass" id="drawer">
+  <div class="drawer-head">
+    <span>Pipeline outputs</span>
+    <button onclick="toggleDrawer()">×</button>
+  </div>
+  <div class="json-tabs" id="json-tabs"></div>
+  <pre class="json-body mono" id="json-body">—</pre>
+</div>
+
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+const STAGES = [
+  { id:"raw",         name:"Raw" },
+  { id:"yolo",        name:"YOLO" },
+  { id:"llm_prompt",  name:"Prompt" },
+  { id:"gdino",       name:"Grounding DINO" },
+  { id:"sam2",        name:"SAM 2" },
+  { id:"depth",       name:"Depth" },
+  { id:"fused",       name:"Fused" },
+  { id:"scene_data",  name:"3D lift" },
+  { id:"decision",    name:"Decision" },
+];
+const THUMB_STAGES = ["raw","yolo","gdino","sam2","depth","fused"];
+const $ = id => document.getElementById(id);
+
+let selectedFile = null;
+const rawData = {};
+let runController = null;
+
+/* ─── Upload ─────────────────────────────────────────── */
+const dropZone = $("drop-zone"), fileInput = $("file-input");
+const uploadPmpt = $("upload-prompt"), previewWrp = $("preview-wrap");
+const previewImg = $("preview-img"), previewNm = $("preview-name");
+const runBtn = $("run-btn");
+
+fileInput.addEventListener("change", e => setFile(e.target.files[0]));
+dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("dragover"); });
+dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+dropZone.addEventListener("drop", e => {
+  e.preventDefault(); dropZone.classList.remove("dragover");
+  const f = e.dataTransfer.files[0];
+  if (f && f.type.startsWith("image/")) setFile(f);
+});
+function setFile(f) {
+  selectedFile = f;
+  const r = new FileReader();
+  r.onload = ev => {
+    previewImg.src = ev.target.result;
+    previewNm.textContent = f.name;
+    uploadPmpt.style.display = "none";
+    previewWrp.style.display = "flex";
+  };
+  r.readAsDataURL(f);
+  runBtn.disabled = false;
+}
+window.clearImage = function(e) {
+  e.stopPropagation();
+  selectedFile = null; fileInput.value = "";
+  uploadPmpt.style.display = ""; previewWrp.style.display = "none";
+  runBtn.disabled = true;
+};
+document.querySelectorAll(".cmd-toggle").forEach(t => {
+  t.addEventListener("click", e => {
     e.preventDefault();
-    dropZone.classList.remove("dragover");
-    const f = e.dataTransfer.files[0];
-    if (f && f.type.startsWith("image/")) setFile(f);
+    const inp = t.querySelector("input");
+    inp.checked = !inp.checked;
+    t.classList.toggle("on", inp.checked);
   });
+});
 
-  function setFile(f) {
-    selectedFile = f;
-    const reader = new FileReader();
-    reader.onload = ev => {
-      previewImg.src   = ev.target.result;
-      previewNm.textContent = f.name;
-      uploadPmpt.style.display = "none";
-      previewWrp.style.display = "flex";
+/* ─── Mini timeline ──────────────────────────────────── */
+function renderMiniTimeline() {
+  const el = $("mini-timeline"); el.innerHTML = "";
+  STAGES.forEach((s, i) => {
+    const dot = document.createElement("div");
+    dot.className = "mt-dot"; dot.dataset.stage = s.id;
+    dot.innerHTML = `<div class="tip">${s.name}</div>`;
+    el.appendChild(dot);
+    if (i < STAGES.length - 1) {
+      const ln = document.createElement("div");
+      ln.className = "mt-line"; ln.dataset.idx = i;
+      el.appendChild(ln);
+    }
+  });
+}
+renderMiniTimeline();
+
+function setStageStatus(id, status) {
+  const d = document.querySelector(`.mt-dot[data-stage="${id}"]`);
+  if (!d) return;
+  d.classList.remove("active","ok","error");
+  if (status !== "idle") d.classList.add(status);
+  if (status === "ok") {
+    const idx = STAGES.findIndex(s => s.id === id);
+    const ln = document.querySelector(`.mt-line[data-idx="${idx}"]`);
+    if (ln) ln.classList.add("ok");
+  }
+}
+
+/* ─── Stage thumbnails ───────────────────────────────── */
+function renderThumbs() {
+  const el = $("stage-thumbs"); el.innerHTML = "";
+  for (const id of THUMB_STAGES) {
+    const stage = STAGES.find(s => s.id === id);
+    const div = document.createElement("div");
+    div.className = "thumb"; div.dataset.stage = id;
+    div.innerHTML = `<div class="tag">${stage.name}</div>`;
+    div.addEventListener("click", () => focusStage(id));
+    el.appendChild(div);
+  }
+}
+renderThumbs();
+
+function addThumb(id, b64) {
+  const th = document.querySelector(`.thumb[data-stage="${id}"]`);
+  if (!th) return;
+  let img = th.querySelector("img");
+  if (!img) { img = document.createElement("img"); th.insertBefore(img, th.firstChild); }
+  img.src = `data:image/png;base64,${b64}`;
+  img.onload = () => requestAnimationFrame(() => th.classList.add("on"));
+}
+function setActiveThumb(id) {
+  document.querySelectorAll(".thumb").forEach(t => t.classList.toggle("active", t.dataset.stage === id));
+}
+
+/* ─── View switcher ──────────────────────────────────── */
+window.showStagesView = function() {
+  $("compositor").classList.add("on");
+  $("compositor").classList.remove("gone");
+  $("three-canvas").style.pointerEvents = "none";
+  $("vs-stages").classList.add("active");
+  $("vs-3d").classList.remove("active");
+  $("ambient").classList.remove("dim");
+  hidePopover();
+};
+window.show3D = function() {
+  if ($("vs-3d").disabled) return;
+  $("compositor").classList.remove("on");
+  $("compositor").classList.add("gone");
+  $("three-canvas").style.pointerEvents = "auto";
+  $("vs-stages").classList.remove("active");
+  $("vs-3d").classList.add("active");
+  $("ambient").classList.add("dim");
+  setActiveThumb(null);
+  $("stage-badge-text").textContent = "3D SCENE";
+  $("stage-badge").classList.add("on");
+  onResize();
+};
+
+function focusStage(id) {
+  showStagesView();
+  const comp = $("compositor");
+  comp.querySelectorAll("img.comp-layer").forEach(l => l.classList.remove("on"));
+  const layer = comp.querySelector(`img.comp-layer[data-stage="${id}"]`);
+  if (layer) layer.classList.add("on");
+  const st = STAGES.find(s => s.id === id);
+  $("stage-badge-text").textContent = (st ? st.name : id).toUpperCase();
+  $("stage-badge").classList.add("on");
+  setActiveThumb(id);
+}
+
+function addLayer(stage, b64) {
+  const comp = $("compositor");
+  let img = comp.querySelector(`img.comp-layer[data-stage="${stage}"]`);
+  if (!img) {
+    img = document.createElement("img");
+    img.className = "comp-layer";
+    img.dataset.stage = stage;
+    // insert before scan-line so the scan-line renders on top
+    comp.insertBefore(img, $("scan-line"));
+  }
+  img.src = `data:image/png;base64,${b64}`;
+  img.onload = () => requestAnimationFrame(() => img.classList.add("on"));
+}
+
+/* ─── Entities ───────────────────────────────────────── */
+const GROUP_COLORS = {
+  HUMAN:"#EF4444", VEHICLE:"#F97316", OBSTACLE:"#3B82F6",
+  SAFETY_MARKER:"#10B981", BACKGROUND:"#71717A",
+  person:"#EF4444", vehicle:"#F97316", bicycle:"#06B6D4",
+  animal:"#84CC16", cone:"#10B981", box:"#F97316", other:"#71717A",
+};
+function renderEntities(detections) {
+  const list = $("entity-list"); list.innerHTML = "";
+  if (!detections || !detections.length) {
+    list.innerHTML = `<div class="placeholder">No objects detected</div>`;
+    $("entity-count").textContent = "0";
+    return;
+  }
+  $("entity-count").textContent = detections.length;
+  detections.forEach((d, i) => {
+    const col = GROUP_COLORS[d.risk_group] || "#fff";
+    const prox = d.proximity_label;
+    const e = document.createElement("div");
+    e.className = "entity";
+    e.dataset.idx = i + 1;
+    e.style.animationDelay = `${i * 50}ms`;
+    e.innerHTML = `
+      <div class="bar ${prox || ''}"></div>
+      <div class="e-body">
+        <div class="e-name">${d.label || "object"}</div>
+        <div class="e-meta">
+          <span class="group" style="color:${col}">${(d.risk_group || "").toLowerCase()}</span>
+          ${d.score != null ? `<span>${(d.score*100|0)}%</span>` : ""}
+          ${prox ? `<span>· ${prox.toLowerCase()}</span>` : ""}
+        </div>
+      </div>`;
+    e.addEventListener("mouseenter", () => highlightNode(i + 1));
+    e.addEventListener("mouseleave", () => highlightNode(null));
+    list.appendChild(e);
+  });
+}
+
+function renderSceneText(text) {
+  const el = $("scene-text");
+  if (!text) { el.innerHTML = `<div class="placeholder">No scene graph</div>`; return; }
+  el.innerHTML = text.replace(/\[(\d+)\]/g, '<span class="hl">[$1]</span>');
+}
+
+/* ─── 3D ─────────────────────────────────────────────── */
+const threeCanvas = $("three-canvas");
+let renderer, scene, camera, controls, pointCloud = null, pcAnimation = null;
+let autoRotate = false;
+let nodeObjects = [];    // { id, label, mesh, halo, data }
+let highlightedId = null;
+
+function initThree() {
+  const w = window.innerWidth, h = window.innerHeight;
+  if (!renderer) {
+    renderer = new THREE.WebGLRenderer({ canvas: threeCanvas, antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x000000, 0);
+    scene = new THREE.Scene();
+    scene.fog = new THREE.Fog(0x0a0a0b, 1.6, 5.0);
+    camera = new THREE.PerspectiveCamera(55, w/h, 0.01, 100);
+    camera.position.set(0, 0, 0.01);
+    controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true; controls.dampingFactor = 0.08;
+    controls.target.set(0, 0, -1.2);
+    controls.addEventListener("start", () => { autoRotate = false; });
+    window.addEventListener("resize", onResize);
+
+    // click picking for nodes
+    renderer.domElement.addEventListener("click", onCanvasClick);
+  }
+  renderer.setSize(w, h, false);
+  camera.aspect = w/h; camera.updateProjectionMatrix();
+}
+function onResize() {
+  if (!renderer) return;
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w/h; camera.updateProjectionMatrix();
+}
+
+async function buildPointCloud(data) {
+  initThree();
+  while (scene.children.length > 0) scene.remove(scene.children[0]);
+  nodeObjects = [];
+  hidePopover();
+
+  const depthImg = await loadImage(`data:image/png;base64,${data.depth_png}`);
+  const colorImg = await loadImage(`data:image/png;base64,${data.color_png}`);
+  const tintImg  = data.tint_png ? await loadImage(`data:image/png;base64,${data.tint_png}`) : null;
+
+  const pc_w = data.pc_w, pc_h = data.pc_h;
+  const mk = () => { const c = document.createElement("canvas"); c.width = pc_w; c.height = pc_h; return c; };
+  const dCan = mk(), cCan = mk(), tCan = mk();
+  const dCtx = dCan.getContext("2d"), cCtx = cCan.getContext("2d"), tCtx = tCan.getContext("2d");
+  dCtx.drawImage(depthImg, 0, 0, pc_w, pc_h);
+  cCtx.drawImage(colorImg, 0, 0, pc_w, pc_h);
+  if (tintImg) tCtx.drawImage(tintImg, 0, 0, pc_w, pc_h);
+  const dPix = dCtx.getImageData(0,0,pc_w,pc_h).data;
+  const cPix = cCtx.getImageData(0,0,pc_w,pc_h).data;
+  const tPix = tintImg ? tCtx.getImageData(0,0,pc_w,pc_h).data : null;
+
+  const zs = new Float32Array(pc_w * pc_h);
+  for (let k = 0; k < zs.length; k++) zs[k] = dPix[k*4] / 255;
+  const sorted = [...zs].sort((a, b) => a - b);
+  const zLo = sorted[Math.floor(sorted.length * 0.02)];
+  const zHi = sorted[Math.floor(sorted.length * 0.97)];
+
+  const W = data.W, H = data.H, fx = data.fx, cx = data.cx, cy = data.cy;
+  const N = pc_w * pc_h;
+  const positions = new Float32Array(N * 3);
+  const flatPositions = new Float32Array(N * 3);
+  const targetPositions = new Float32Array(N * 3);
+  const colors = new Float32Array(N * 3);
+  const ys = [];
+
+  let i = 0;
+  for (let v = 0; v < pc_h; v++) {
+    for (let u = 0; u < pc_w; u++) {
+      let zNorm = dPix[(v*pc_w+u)*4] / 255;
+      zNorm = Math.max(zLo, Math.min(zHi, zNorm));
+      zNorm = (zNorm - zLo) / Math.max(1e-6, zHi - zLo);
+      const z = zNorm * 1.3 + 0.35;
+      const uu = u / pc_w * W;
+      const vv = v / pc_h * H;
+      const X = (uu - cx) * z / fx;
+      const Y = (vv - cy) * z / fx;
+      targetPositions[i*3]   = X;
+      targetPositions[i*3+1] = -Y;
+      targetPositions[i*3+2] = -z;
+      ys.push(-Y);
+      flatPositions[i*3]   = (uu - cx) / fx * 1.2;
+      flatPositions[i*3+1] = -(vv - cy) / fx * 1.2;
+      flatPositions[i*3+2] = -1.2;
+
+      let r = cPix[(v*pc_w+u)*4]   / 255;
+      let g = cPix[(v*pc_w+u)*4+1] / 255;
+      let b = cPix[(v*pc_w+u)*4+2] / 255;
+      if (tPix) {
+        const a = tPix[(v*pc_w+u)*4+3] / 255;
+        if (a > 0.05) {
+          const tr = tPix[(v*pc_w+u)*4]   / 255;
+          const tg = tPix[(v*pc_w+u)*4+1] / 255;
+          const tb = tPix[(v*pc_w+u)*4+2] / 255;
+          const w = 0.55 * a;
+          r = r*(1-w) + tr*w;
+          g = g*(1-w) + tg*w;
+          b = b*(1-w) + tb*w;
+        }
+      }
+      colors[i*3] = r; colors[i*3+1] = g; colors[i*3+2] = b;
+      positions[i*3] = flatPositions[i*3];
+      positions[i*3+1] = flatPositions[i*3+1];
+      positions[i*3+2] = flatPositions[i*3+2];
+      i++;
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  geo.userData = { flatPositions, targetPositions };
+
+  const mat = new THREE.PointsMaterial({
+    size: 0.020, vertexColors: true, sizeAttenuation: true,
+    transparent: true, opacity: 0.92, depthWrite: false,
+  });
+  pointCloud = new THREE.Points(geo, mat);
+  scene.add(pointCloud);
+
+  // Ground (faded grid via custom shader plane for radial alpha fade)
+  ys.sort((a, b) => a - b);
+  const groundY = ys[Math.floor(ys.length * 0.10)] - 0.02;
+  const zMid = -(0.35 + 1.3 * 0.5);
+  const groundSize = 4.5;
+
+  const gridMat = new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false,
+    uniforms: { uColor: { value: new THREE.Color(0x00d4ff) } },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: `
+      varying vec2 vUv;
+      uniform vec3 uColor;
+      void main() {
+        vec2 g = abs(fract(vUv * 22.0 - 0.5) - 0.5) / fwidth(vUv * 22.0);
+        float line = 1.0 - min(min(g.x, g.y), 1.0);
+        float r = distance(vUv, vec2(0.5));
+        float fade = smoothstep(0.55, 0.15, r);
+        float alpha = line * fade * 0.65;
+        if (alpha < 0.01) discard;
+        gl_FragColor = vec4(uColor, alpha);
+      }`,
+    side: THREE.DoubleSide,
+  });
+  const grid = new THREE.Mesh(new THREE.PlaneGeometry(groundSize, groundSize), gridMat);
+  grid.rotation.x = -Math.PI / 2;
+  grid.position.set(0, groundY, zMid);
+  scene.add(grid);
+
+  // Subtle floor gradient
+  const floor = new THREE.Mesh(
+    new THREE.PlaneGeometry(groundSize, groundSize),
+    new THREE.MeshBasicMaterial({ color: 0x040407, transparent: true, opacity: 0.6, side: THREE.DoubleSide, depthWrite: false })
+  );
+  floor.rotation.x = -Math.PI / 2;
+  floor.position.set(0, groundY - 0.003, zMid);
+  scene.add(floor);
+
+  // Robot marker
+  const cone = new THREE.Mesh(
+    new THREE.ConeGeometry(0.05, 0.12, 20),
+    new THREE.MeshBasicMaterial({ color: 0x00d4ff })
+  );
+  cone.rotation.x = Math.PI / 2;
+  cone.position.set(0, groundY + 0.06, 0);
+  scene.add(cone);
+
+  // Nodes — glowing icosahedron with translucent halo
+  if (data.nodes) {
+    const unproject = (u_img, v_img, zNormRaw) => {
+      let zN = Math.max(zLo, Math.min(zHi, zNormRaw));
+      zN = (zN - zLo) / Math.max(1e-6, zHi - zLo);
+      const z = zN * 1.3 + 0.35;
+      const X = (u_img - cx) * z / fx;
+      const Y = (v_img - cy) * z / fx;
+      return new THREE.Vector3(X, -Y, -z);
     };
-    reader.readAsDataURL(f);
-    updateRunBtn();
-  }
+    const positionsById = {};
+    for (const n of data.nodes) {
+      const [x1, y1, x2, y2] = n.box_2d || [0,0,0,0];
+      const pos = unproject((x1+x2)/2, (y1+y2)/2, n.depth_score ?? 0.5);
+      positionsById[n.id] = pos;
 
-  function clearImage(e) {
-    e.stopPropagation();
-    selectedFile = null;
-    fileInput.value = "";
-    previewImg.src  = "";
-    uploadPmpt.style.display = "";
-    previewWrp.style.display = "none";
-    updateRunBtn();
-  }
+      const col = new THREE.Color(GROUP_COLORS[n.risk_group] || "#ffffff");
+      const core = new THREE.Mesh(
+        new THREE.IcosahedronGeometry(0.045, 1),
+        new THREE.MeshBasicMaterial({ color: col })
+      );
+      core.position.copy(pos);
+      core.userData = { nodeId: n.id };
+      scene.add(core);
 
-  // ── Stage toggling ─────────────────────────────────────────────────────────
+      const halo = new THREE.Mesh(
+        new THREE.SphereGeometry(0.11, 20, 20),
+        new THREE.MeshBasicMaterial({
+          color: col, transparent: true, opacity: 0.18,
+          depthWrite: false
+        })
+      );
+      halo.position.copy(pos); scene.add(halo);
 
-  function toggleStage(el) {
-    if (el.classList.contains("disabled")) return;
-    el.classList.toggle("selected");
-    updateRunBtn();
-  }
+      // Faint stalk down to ground so depth reads clearly
+      const stalkGeo = new THREE.BufferGeometry().setFromPoints([
+        pos, new THREE.Vector3(pos.x, groundY + 0.002, pos.z)
+      ]);
+      const stalk = new THREE.Line(stalkGeo, new THREE.LineBasicMaterial({
+        color: col, transparent: true, opacity: 0.25
+      }));
+      scene.add(stalk);
 
-  function getSelectedStages() {
-    return [...document.querySelectorAll(".stage.selected:not(.disabled)")]
-      .map(el => el.dataset.stage);
-  }
-
-  function updateRunBtn() {
-    const hasFile   = !!selectedFile;
-    const hasStage  = getSelectedStages().length > 0;
-    runBtn.disabled = !(hasFile && hasStage);
-  }
-
-  // ── Colormap ───────────────────────────────────────────────────────────────
-
-  function selectCm(btn) {
-    document.querySelectorAll(".cm-btn").forEach(b => b.classList.remove("active"));
-    btn.classList.add("active");
-    selectedCm = btn.dataset.cm;
-  }
-
-  // ── Run ────────────────────────────────────────────────────────────────────
-
-  async function run() {
-    if (!selectedFile) return;
-
-    const stages = getSelectedStages();
-    if (!stages.length) return;
-
-    // Show spinner
-    runBtn.disabled = true;
-    document.getElementById("spinner").style.display = "block";
-    document.getElementById("run-label").textContent = "Running…";
-
-    const form = new FormData();
-    form.append("image",    selectedFile);
-    form.append("stages",   stages.join(","));
-    form.append("colormap", selectedCm);
-
-    try {
-      const res  = await fetch("/run", { method: "POST", body: form });
-      const data = await res.json();
-      renderResults(data, stages);
-    } catch (err) {
-      renderError(err.toString());
-    } finally {
-      runBtn.disabled = false;
-      document.getElementById("spinner").style.display = "none";
-      document.getElementById("run-label").textContent = "Run pipeline";
-      updateRunBtn();
+      nodeObjects.push({ id: n.id, data: n, mesh: core, halo, baseScale: 1 });
+    }
+    for (const e of (data.edges || [])) {
+      if (!positionsById[e.from_id] || !positionsById[e.to_id]) continue;
+      const g = new THREE.BufferGeometry().setFromPoints([positionsById[e.from_id], positionsById[e.to_id]]);
+      scene.add(new THREE.Line(g, new THREE.LineBasicMaterial({
+        color: e.blocking ? 0xef4444 : 0x40404a,
+        transparent: true, opacity: e.blocking ? 0.85 : 0.25
+      })));
     }
   }
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+  camera.position.set(0, 0, 0.1);
+  controls.target.set(0, 0, -1.2);
+  controls.update();
+  autoRotate = true;
 
-  function renderResults(data, stages) {
-    const container = document.getElementById("results");
+  startRenderLoop();
+  morphToPointCloud();
+}
 
-    if (data.error) { renderError(data.error); return; }
-
-    let html = "";
-
-    if (data.depth) {
-      html += `
-        <div class="result-block">
-          <div class="result-label">Depth Estimation</div>
-          <div class="image-row">
-            <div class="image-card">
-              <div class="card-label">Original</div>
-              <img src="data:image/png;base64,${data.depth.original}" />
-            </div>
-            <div class="image-card">
-              <div class="card-label">Depth heatmap</div>
-              <img src="data:image/png;base64,${data.depth.heatmap}" />
-            </div>
-          </div>
-        </div>`;
+function startRenderLoop() {
+  if (startRenderLoop._running) return;
+  startRenderLoop._running = true;
+  let t0 = performance.now();
+  const tick = () => {
+    const now = performance.now();
+    const dt = (now - t0) / 1000; t0 = now;
+    if (autoRotate && controls) {
+      const target = controls.target;
+      const offset = camera.position.clone().sub(target);
+      const r = Math.hypot(offset.x, offset.z);
+      const angle = Math.atan2(offset.z, offset.x) + dt * 0.12;
+      camera.position.x = target.x + r * Math.cos(angle);
+      camera.position.z = target.z + r * Math.sin(angle);
+      camera.position.y = target.y + 0.18;
+      camera.lookAt(target);
     }
+    // Breathing animation on nodes
+    const breathe = 1 + Math.sin(now * 0.003) * 0.06;
+    for (const n of nodeObjects) {
+      const s = n.id === highlightedId ? 1.35 : 1;
+      n.mesh.scale.setScalar(breathe * s);
+      n.halo.scale.setScalar(breathe * s * 0.9);
+    }
+    if (renderer && camera) {
+      controls.update();
+      renderer.render(scene, camera);
+      updatePopoverPosition();
+    }
+    requestAnimationFrame(tick);
+  };
+  tick();
+}
 
-    container.innerHTML = html || `<div class="empty-state"><p>No output returned.</p></div>`;
+function morphToPointCloud() {
+  if (!pointCloud) return;
+  const { flatPositions, targetPositions } = pointCloud.geometry.userData;
+  const posAttr = pointCloud.geometry.attributes.position;
+  const N = posAttr.count;
+  const duration = 2400;
+  const start = performance.now();
+  const camStart = camera.position.clone();
+  const camEnd = new THREE.Vector3(0.0, 0.18, 0.7);
+  const tgtStart = controls.target.clone();
+  const tgtEnd = new THREE.Vector3(0, 0, -1.3);
+  if (pcAnimation) cancelAnimationFrame(pcAnimation);
+  const step = () => {
+    const t = Math.min(1, (performance.now() - start) / duration);
+    const e = 0.5 - 0.5 * Math.cos(Math.PI * t);
+    for (let i = 0; i < N; i++) {
+      posAttr.array[i*3]   = flatPositions[i*3]   + (targetPositions[i*3]   - flatPositions[i*3])   * e;
+      posAttr.array[i*3+1] = flatPositions[i*3+1] + (targetPositions[i*3+1] - flatPositions[i*3+1]) * e;
+      posAttr.array[i*3+2] = flatPositions[i*3+2] + (targetPositions[i*3+2] - flatPositions[i*3+2]) * e;
+    }
+    posAttr.needsUpdate = true;
+    camera.position.lerpVectors(camStart, camEnd, e);
+    controls.target.lerpVectors(tgtStart, tgtEnd, e);
+    if (t < 1) pcAnimation = requestAnimationFrame(step);
+  };
+  pcAnimation = requestAnimationFrame(step);
+}
+function loadImage(src) {
+  return new Promise((res, rej) => {
+    const img = new Image(); img.onload = () => res(img); img.onerror = rej; img.src = src;
+  });
+}
+
+/* ─── Node picking + popover ─────────────────────────── */
+const raycaster = new THREE.Raycaster();
+const mouseVec = new THREE.Vector2();
+let selectedNode = null;
+
+function onCanvasClick(e) {
+  if (!$("vs-3d").classList.contains("active")) return;
+  if (nodeObjects.length === 0) return;
+  mouseVec.x = (e.clientX / window.innerWidth)  * 2 - 1;
+  mouseVec.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouseVec, camera);
+  const meshes = nodeObjects.map(n => n.mesh);
+  const hits = raycaster.intersectObjects(meshes, false);
+  if (hits.length) {
+    const id = hits[0].object.userData.nodeId;
+    showPopover(id);
+  } else {
+    hidePopover();
+  }
+}
+
+function showPopover(id) {
+  const node = nodeObjects.find(n => n.id === id);
+  if (!node) return;
+  selectedNode = node;
+  highlightedId = id;
+  const d = node.data;
+  const prox = d.proximity_label || "MEDIUM";
+  const pop = $("popover");
+  const [cX, cY, cZ] = d.centroid_3d || [0,0,0];
+  pop.innerHTML = `
+    <div class="pop-name">${d.label || "object"}</div>
+    <div class="pop-meta">
+      <span class="pop-chip ${prox}">${prox}</span>
+      <span><b>${(d.risk_group || "").toLowerCase()}</b></span>
+      <span>depth <b class="mono">${(d.depth_score ?? 0).toFixed(2)}</b></span>
+      <span class="mono">pos (${cX.toFixed(2)}, ${cY.toFixed(2)}, ${cZ.toFixed(2)})</span>
+    </div>`;
+  updatePopoverPosition();
+  pop.classList.add("on");
+  // mirror selection in sidebar
+  document.querySelectorAll(".entity").forEach(e => e.classList.toggle("selected", +e.dataset.idx === id));
+}
+function hidePopover() {
+  $("popover").classList.remove("on");
+  selectedNode = null; highlightedId = null;
+  document.querySelectorAll(".entity").forEach(e => e.classList.remove("selected"));
+}
+function updatePopoverPosition() {
+  if (!selectedNode || !camera) return;
+  const v = selectedNode.mesh.position.clone().project(camera);
+  const x = (v.x + 1) / 2 * window.innerWidth;
+  const y = (1 - (v.y + 1) / 2) * window.innerHeight;
+  if (v.z > 1) { hidePopover(); return; }
+  const pop = $("popover");
+  pop.style.left = `${x}px`;
+  pop.style.top  = `${y - 12}px`;
+}
+function highlightNode(id) {
+  highlightedId = id;
+  if (id == null) hidePopover();
+  else if (nodeObjects.find(n => n.id === id)) showPopover(id);
+}
+
+/* ─── Decision ───────────────────────────────────────── */
+function showDecision(ev) {
+  const el = $("decision");
+  const big = $("decision-big");
+  big.textContent = ev.label;
+  big.style.color = ev.color;
+  el.style.boxShadow = `0 0 0 1px ${ev.color}33 inset, 0 0 0 1px ${ev.color}22, 0 30px 60px rgba(0,0,0,0.55), 0 0 80px ${ev.color}22`;
+  const ul = $("decision-reasons"); ul.innerHTML = "";
+  for (const r of (ev.reasons || [])) {
+    const li = document.createElement("li"); li.textContent = r; ul.appendChild(li);
+  }
+  requestAnimationFrame(() => el.classList.add("on"));
+}
+
+/* ─── JSON drawer ────────────────────────────────────── */
+window.toggleDrawer = function() { $("drawer").classList.toggle("on"); };
+function renderJsonTabs() {
+  const tabs = $("json-tabs"); tabs.innerHTML = "";
+  const keys = Object.keys(rawData);
+  if (!keys.length) return;
+  keys.forEach((k, i) => {
+    const b = document.createElement("button");
+    b.className = "json-tab" + (i === 0 ? " active" : "");
+    b.textContent = k;
+    b.onclick = () => {
+      tabs.querySelectorAll(".json-tab").forEach(x => x.classList.remove("active"));
+      b.classList.add("active");
+      $("json-body").textContent = JSON.stringify(redact(rawData[k]), null, 2);
+    };
+    tabs.appendChild(b);
+  });
+  $("json-body").textContent = JSON.stringify(redact(rawData[keys[0]]), null, 2);
+  $("json-btn").style.display = "inline-flex";
+}
+function redact(obj) {
+  if (!obj || typeof obj !== "object") return obj;
+  if (Array.isArray(obj)) return obj.map(redact);
+  const out = {};
+  for (const k of Object.keys(obj)) {
+    if (/_png$|^image$/.test(k) && typeof obj[k] === "string" && obj[k].length > 100) {
+      out[k] = `‹base64 · ${(obj[k].length/1024|0)} KB›`;
+    } else out[k] = redact(obj[k]);
+  }
+  return out;
+}
+
+/* ─── Sidebar toggles ────────────────────────────────── */
+window.toggleSidebar = function(side) {
+  const el = $(side === "left" ? "sidebar-left" : "sidebar-right");
+  el.classList.toggle("hidden");
+  const btn = $(side === "left" ? "sbt-l" : "sbt-r");
+  const collapsed = el.classList.contains("hidden");
+  if (side === "left")  btn.textContent = collapsed ? "›" : "‹";
+  else                  btn.textContent = collapsed ? "‹" : "›";
+};
+
+/* ─── Run / Cancel / New ─────────────────────────────── */
+window.run = async function() {
+  if (!selectedFile) return;
+
+  // Reset
+  $("compositor").querySelectorAll("img.comp-layer").forEach(l => l.remove());
+  $("decision").classList.remove("on");
+  for (const s of STAGES) setStageStatus(s.id, "idle");
+  document.querySelectorAll(".mt-line").forEach(l => l.classList.remove("ok"));
+  for (const k in rawData) delete rawData[k];
+  $("json-body").textContent = "—";
+  $("json-tabs").innerHTML = "";
+  $("json-btn").style.display = "none";
+  $("drawer").classList.remove("on");
+  document.querySelectorAll(".thumb").forEach(t => {
+    t.classList.remove("on","active"); const i = t.querySelector("img"); if (i) i.remove();
+  });
+  $("vs-3d").disabled = true;
+  $("entity-list").innerHTML = `<div class="placeholder">Awaiting detections</div>`;
+  $("entity-count").textContent = "0";
+  $("scene-text").innerHTML = `<div class="placeholder">Analyzing…</div>`;
+  nodeObjects = []; hidePopover();
+  if (scene) while (scene.children.length) scene.remove(scene.children[0]);
+
+  // Switch UI
+  $("hero").classList.add("gone");
+  $("sidebar-left").classList.remove("hidden");
+  $("sidebar-right").classList.remove("hidden");
+  $("sbt-l").textContent = "‹"; $("sbt-r").textContent = "›";
+  $("left-original").src = URL.createObjectURL(selectedFile);
+  showStagesView();
+  $("stage-badge").classList.add("on");
+  $("scan-line").classList.add("on");
+
+  runBtn.disabled = true;
+  runBtn.classList.add("running");
+  $("run-label").textContent = "Running";
+  $("status-text").textContent = "processing";
+  $("cancel-btn").style.display = "inline-flex";
+  $("new-btn").style.display = "inline-flex";
+
+  runController = new AbortController();
+  const form = new FormData();
+  form.append("image", selectedFile);
+  form.append("use_gdino", $("tg-gdino").querySelector("input").checked ? "true" : "false");
+  form.append("use_sam",   $("tg-sam").querySelector("input").checked   ? "true" : "false");
+
+  try {
+    const resp = await fetch("/run_full", { method: "POST", body: form, signal: runController.signal });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line) continue;
+        try { handleEvent(JSON.parse(line)); } catch(e) { console.warn("bad", line); }
+      }
+    }
+  } catch (err) {
+    if (err.name === "AbortError") {
+      $("stage-badge-text").textContent = "CANCELLED";
+      $("status-text").textContent = "cancelled";
+    } else {
+      console.error(err); $("stage-badge-text").textContent = "ERROR";
+    }
+  } finally {
+    runController = null;
+    runBtn.disabled = !selectedFile;
+    runBtn.classList.remove("running");
+    $("run-label").textContent = "Run again";
+    $("status-text").textContent = $("status-text").textContent === "cancelled" ? "cancelled" : "ready";
+    $("scan-line").classList.remove("on");
+    $("cancel-btn").style.display = "none";
+    renderJsonTabs();
+  }
+};
+
+window.cancelRun = function() {
+  if (runController) runController.abort();
+};
+window.newImage = function() {
+  if (runController) runController.abort();
+  $("compositor").querySelectorAll("img.comp-layer").forEach(l => l.remove());
+  $("decision").classList.remove("on");
+  for (const s of STAGES) setStageStatus(s.id, "idle");
+  document.querySelectorAll(".mt-line").forEach(l => l.classList.remove("ok"));
+  for (const k in rawData) delete rawData[k];
+  $("json-body").textContent = "—";
+  $("json-tabs").innerHTML = "";
+  $("json-btn").style.display = "none";
+  $("drawer").classList.remove("on");
+  document.querySelectorAll(".thumb").forEach(t => {
+    t.classList.remove("on","active"); const i = t.querySelector("img"); if (i) i.remove();
+  });
+  $("vs-3d").disabled = true; $("vs-3d").classList.remove("active");
+  $("vs-stages").classList.add("active");
+  $("stage-badge").classList.remove("on");
+  if (scene) while (scene.children.length) scene.remove(scene.children[0]);
+  nodeObjects = []; hidePopover();
+  selectedFile = null; fileInput.value = "";
+  uploadPmpt.style.display = ""; previewWrp.style.display = "none";
+  $("hero").classList.remove("gone");
+  $("ambient").classList.remove("dim");
+  $("sidebar-left").classList.add("hidden");
+  $("sidebar-right").classList.add("hidden");
+  $("new-btn").style.display = "none";
+  $("cancel-btn").style.display = "none";
+  $("compositor").classList.remove("on");
+  runBtn.disabled = true;
+  $("run-label").textContent = "Run pipeline";
+  $("status-text").textContent = "ready";
+};
+
+function handleEvent(ev) {
+  rawData[ev.stage] = ev;
+  setStageStatus(ev.stage, ev.status);
+
+  if (ev.status === "running") {
+    $("stage-badge-text").textContent = (ev.title || ev.stage).toUpperCase();
+    return;
+  }
+  if (ev.status === "error") {
+    return;
   }
 
-  function renderError(msg) {
-    document.getElementById("results").innerHTML =
-      `<div class="error-box">Error: ${msg}</div>`;
+  $("stage-badge-text").textContent = (ev.title || ev.stage).toUpperCase();
+
+  if (ev.stage === "raw" && ev.meta) {
+    $("input-dims").textContent = `${ev.meta.width}×${ev.meta.height}`;
   }
+  if (ev.image) {
+    addLayer(ev.stage, ev.image);
+    if (THUMB_STAGES.includes(ev.stage)) addThumb(ev.stage, ev.image);
+    setActiveThumb(ev.stage);
+  }
+  if (ev.meta && Array.isArray(ev.meta.detections)) {
+    renderEntities(ev.meta.detections);
+  }
+  if (ev.stage === "scene_data") {
+    $("vs-3d").disabled = false;
+    show3D();
+    buildPointCloud(ev).catch(e => console.error(e));
+    if (ev.text) renderSceneText(ev.text);
+  }
+  if (ev.stage === "decision") {
+    showDecision(ev);
+  }
+}
 </script>
-
 </body>
 </html>
