@@ -186,6 +186,118 @@ def _encode_gray_png(arr_u8: np.ndarray) -> str:
 
 # ── decision heuristic ────────────────────────────────────────────────────────
 
+def _get_openai_client():
+    """Shared OpenAI client (same singleton segment_module.llm_objects uses)."""
+    if "openai" not in _cache:
+        from segment_module.llm_objects import load_client
+        _cache["openai"] = load_client()
+    return _cache["openai"]
+
+
+def _llm_consistency_check(client, enriched: list[dict]) -> list[dict]:
+    """
+    Ask GPT-4o-mini whether any objects' depth estimates are inconsistent
+    with real-world relationships (helmet/person, tire/car, etc.) and
+    return a list of corrections: [{"id": i, "new_depth": 0-1, "because": ...}]
+    """
+    import json as _json
+    obj_lines = []
+    for i, d in enumerate(enriched):
+        ds = d.get("depth_score")
+        if ds is None:
+            ds = 0.5
+        box = d.get("box") or []
+        obj_lines.append(
+            f"[{i}] {d.get('label','?')} "
+            f"(group={d.get('risk_group','?')}, "
+            f"depth={float(ds):.2f}, "
+            f"prox={d.get('proximity_label','?')}, "
+            f"box={[int(v) for v in box]})"
+        )
+
+    prompt = (
+        "You are reviewing a robot perception pipeline's per-object proximity "
+        "estimates. Each object has a proximity score in [0, 1] where 0 = closest "
+        "to the camera and 1 = farthest.\n\n"
+        "Objects:\n" + "\n".join(obj_lines) + "\n\n"
+        "Apply these real-world spatial priors:\n\n"
+        "GROUP SNAPPING (same physical entity → same depth):\n"
+        "  • Wearables (helmet, hard hat, hi-vis vest) → snap to the person wearing them.\n"
+        "  • Vehicle parts (tire, wheel, headlight, mirror) → snap to the vehicle.\n"
+        "  • Body parts (head, hand, torso) → snap to the person.\n"
+        "  • Held tools / carried objects → snap to the worker holding them.\n"
+        "  • Objects overlapping in 2D with very different depths → probably one entity.\n\n"
+        "BACKGROUND / ENVIRONMENT SEPARATION:\n"
+        "  • BACKGROUND and SURFACE objects (walls, floor, shelves, racks, scenery) "
+        "should be pushed FARTHER from camera (higher depth, 0.65–0.90) unless they "
+        "are obviously right in front of the camera (bbox > 25% of image).\n"
+        "  • Small-bbox background items (< 5% of image) at CLOSE depth are almost "
+        "certainly wrong — push them to at least 0.60.\n"
+        "  • Scenery / infrastructure (ceiling, pillars, distant shelving) should be "
+        "at FAR depth (0.70+).\n"
+        "  • Do NOT pull background objects forward — only push them farther.\n\n"
+        "RELATIVE ORDERING:\n"
+        "  • Large foreground humans/vehicles should always be CLOSER than small "
+        "background objects behind them.\n"
+        "  • If a small object is in front of a large object (by 2D overlap) but "
+        "scored farther, correct it.\n\n"
+        "For each detection whose depth is clearly wrong, output a correction.\n\n"
+        'Return ONLY a JSON object:\n'
+        '{"corrections": [\n'
+        '  {"id": <int>, "new_depth": <float 0-1>, "anchor_id": <int or null>, '
+        '"because": "<short reason>"}\n'
+        ']}\n\n'
+        "If everything looks consistent, return {\"corrections\": []}. "
+        "Only flag cases with HIGH confidence — do not guess."
+    )
+
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=700,
+            response_format={"type": "json_object"},
+            temperature=0.1,
+        )
+        parsed = _json.loads(resp.choices[0].message.content.strip())
+        corrections = parsed.get("corrections", [])
+        # Basic sanitisation
+        clean = []
+        for c in corrections:
+            try:
+                idx = int(c.get("id", -1))
+                nd  = float(c.get("new_depth", 0.5))
+                nd  = max(0.0, min(1.0, nd))
+                if 0 <= idx < len(enriched):
+                    clean.append({
+                        "id": idx,
+                        "new_depth": nd,
+                        "anchor_id": c.get("anchor_id"),
+                        "because": str(c.get("because", "")),
+                    })
+            except Exception:
+                continue
+        return clean
+    except Exception as e:
+        print(f"  [consistency_check] failed: {e}")
+        return []
+
+
+def _detection_summary(detections: list[dict]) -> str:
+    """Text fallback when the scene graph isn't available."""
+    if not detections:
+        return "Scene: no objects detected."
+    lines = ["Scene (detection summary):"]
+    for d in detections:
+        lines.append(
+            f"  - {d.get('label','?')} ({d.get('risk_group','?')}) "
+            f"proximity={d.get('proximity_label','?')} "
+            f"zone={d.get('path_zone','?')} "
+            f"depth={d.get('depth_score','?')}"
+        )
+    return "\n".join(lines)
+
+
 def _make_decision(enriched: list[dict]) -> dict:
     hits = []
     reasons = []
@@ -226,8 +338,20 @@ def index():
     return FileResponse("static/index.html")
 
 
+class _SafeEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, np.ndarray):
+            return None
+        if isinstance(o, (np.floating,)):
+            return float(o)
+        if isinstance(o, (np.integer,)):
+            return int(o)
+        return super().default(o)
+
+
 def _event(stage: str, status: str, **kw) -> bytes:
-    return (json.dumps({"stage": stage, "status": status, **kw}) + "\n").encode()
+    return (json.dumps({"stage": stage, "status": status, **kw},
+                       cls=_SafeEncoder) + "\n").encode()
 
 
 @app.post("/run_full")
@@ -252,49 +376,36 @@ async def run_full(
                      image=_pil_to_b64(pil),
                      meta={"width": W, "height": H})
 
-        # 2. YOLO --------------------------------------------------------------
-        yield _event("yolo", "running", title="YOLO detection",
-                     message="Running YOLO...")
-        yolo_dets: list[dict] = []
+        # Share a single OpenAI client across all LLM sub-steps
+        llm_client_shared = None
         try:
-            from src.label_ontology import map_detections
-            from segment_module.segment import detect_image
-            yolo = _get_yolo()
-            raw_dets = detect_image(yolo, pil, score_threshold=0.25)
-            yolo_dets = map_detections(raw_dets)
-            img = _draw_detections_on(base_bgr, yolo_dets)
-            yield _event("yolo", "ok", title="YOLO detection",
-                         image=_bgr_to_b64(img),
-                         meta={"count": len(yolo_dets),
-                               "detections": [
-                                   {"label": d["label"], "score": d["score"],
-                                    "risk_group": d.get("risk_group")}
-                                   for d in yolo_dets]})
+            llm_client_shared = _get_openai_client()
         except Exception as e:
             traceback.print_exc()
-            yield _event("yolo", "error", title="YOLO detection",
-                         message=f"{type(e).__name__}: {e}")
 
-        # 3. LLM prompt --------------------------------------------------------
+        # 2. LLM → object prompt ----------------------------------------------
         llm_prompt = None
-        if want_gdino:
-            yield _event("llm_prompt", "running", title="LLM → object prompt",
-                         message="Asking GPT to enumerate scene objects...")
-            try:
-                from segment_module.llm_objects import load_client, get_detection_prompt
-                client = load_client()
-                llm_prompt = get_detection_prompt(client, pil)
-                yield _event("llm_prompt", "ok", title="LLM → object prompt",
-                             text=llm_prompt)
-            except Exception as e:
-                yield _event("llm_prompt", "error", title="LLM → object prompt",
-                             message=f"{type(e).__name__}: {e}")
+        yield _event("llm_prompt", "running", title="LLM → object prompt",
+                     message="Asking GPT-4o-mini to enumerate visible objects...")
+        try:
+            from segment_module.llm_objects import load_client, get_detection_prompt
+            prompt_client = load_client()
+            llm_prompt = get_detection_prompt(prompt_client, pil)
+            yield _event("llm_prompt", "ok", title="LLM → object prompt",
+                         text=llm_prompt)
+        except Exception as e:
+            traceback.print_exc()
+            # Fallback — generic industrial-scene prompt
+            llm_prompt = "person . vehicle . forklift . barrel . cone . box . ladder . hard hat ."
+            yield _event("llm_prompt", "error", title="LLM → object prompt",
+                         message=f"{type(e).__name__}: {e}; using fallback prompt",
+                         text=llm_prompt)
 
-        # 4. Grounding DINO ----------------------------------------------------
+        # 3. Grounding DINO ----------------------------------------------------
         gdino_dets: list[dict] = []
-        if want_gdino and llm_prompt:
+        if want_gdino:
             yield _event("gdino", "running", title="Grounding DINO",
-                         message="Loading Grounding DINO...")
+                         message="Open-vocabulary detection from LLM prompt...")
             try:
                 from segment_module.grounding_dino import detect as gdino_detect
                 gdino = _get_gdino()
@@ -311,14 +422,20 @@ async def run_full(
                 traceback.print_exc()
                 yield _event("gdino", "error", title="Grounding DINO",
                              message=f"{type(e).__name__}: {e}")
+        else:
+            yield _event("gdino", "error", title="Grounding DINO",
+                         message="Grounding DINO disabled — skipping")
 
-        dets_for_depth = gdino_dets if gdino_dets else yolo_dets
+        dets_for_depth = list(gdino_dets)
+        if not dets_for_depth:
+            yield _event("filter", "error", title="Filter",
+                         message="No detections — nothing to process downstream")
 
-        # 5. SAM 2 -------------------------------------------------------------
+        # 4. SAM 2 -------------------------------------------------------------
         sam_results: list[dict] = []
         if want_sam and dets_for_depth:
             yield _event("sam2", "running", title="SAM 2",
-                         message="Loading SAM 2...")
+                         message="Segmenting each detection...")
             try:
                 from segment_module.sam2 import segment
                 sam = _get_sam2()
@@ -329,9 +446,36 @@ async def run_full(
                              meta={"count": sum(1 for r in sam_results
                                                 if r.get("mask") is not None
                                                 and r["mask"].any())})
+                # sam_results carry the masks + all fields from gdino_dets →
+                # promote to the downstream detection list
+                dets_for_depth = sam_results
             except Exception as e:
                 traceback.print_exc()
                 yield _event("sam2", "error", title="SAM 2",
+                             message=f"{type(e).__name__}: {e}")
+
+        # 5. Filter — is this scene worth analysing? ---------------------------
+        if dets_for_depth:
+            yield _event("filter", "running", title="Scene filter",
+                         message="Checking for risk-relevant objects...")
+            try:
+                from src.filter_module import is_interesting
+                interesting = is_interesting(dets_for_depth, conf_threshold=0.25)
+                if interesting:
+                    hazards = [d for d in dets_for_depth
+                               if d.get("risk_group") not in ("BACKGROUND", "SURFACE")]
+                    yield _event("filter", "ok", title="Scene filter",
+                                 text=f"Interesting — {len(hazards)} hazard-group detection(s)",
+                                 meta={"interesting": True,
+                                       "hazard_count": len(hazards)})
+                else:
+                    yield _event("filter", "ok", title="Scene filter",
+                                 text="Scene has no risk-relevant objects "
+                                      "(only SURFACE/BACKGROUND); continuing for visualisation",
+                                 meta={"interesting": False})
+            except Exception as e:
+                traceback.print_exc()
+                yield _event("filter", "error", title="Scene filter",
                              message=f"{type(e).__name__}: {e}")
 
         # 6. DepthAnything -----------------------------------------------------
@@ -354,12 +498,55 @@ async def run_full(
             yield _event("depth", "error", title="Depth Anything V2",
                          message=f"{type(e).__name__}: {e}")
 
-        # 7. Fused depth -------------------------------------------------------
+        # 7. LLM holistic depth signals ---------------------------------------
+        if depth_norm is not None and dets_for_depth and llm_client_shared is not None:
+            yield _event("llm_depth", "running", title="LLM depth reasoning",
+                         message="GPT scores per-object proximity from scene context...")
+            try:
+                from src.llm_depth import get_llm_depth_signals
+                dets_for_depth = get_llm_depth_signals(pil, dets_for_depth, llm_client_shared)
+                hits = [d for d in dets_for_depth
+                        if d.get("depth_llm_label") in ("CLOSE", "MEDIUM", "FAR")]
+                yield _event("llm_depth", "ok", title="LLM depth reasoning",
+                             text=f"Per-object proximity estimated for {len(hits)} object(s)",
+                             meta={"detections": [
+                                 {"label": d.get("label"),
+                                  "risk_group": d.get("risk_group"),
+                                  "depth_llm_label": d.get("depth_llm_label"),
+                                  "depth_llm_conf": d.get("depth_llm_conf"),
+                                  "depth_llm_reason": d.get("depth_llm_reason"),
+                                  }
+                                 for d in dets_for_depth]})
+            except Exception as e:
+                traceback.print_exc()
+                yield _event("llm_depth", "error", title="LLM depth reasoning",
+                             message=f"{type(e).__name__}: {e}")
+
+        # 8. Edge-clip rationalization ----------------------------------------
+        if depth_norm is not None and dets_for_depth and llm_client_shared is not None:
+            yield _event("edge_rat", "running", title="Edge rationalization",
+                         message="Disambiguating edge-clipped detections...")
+            try:
+                from src.edge_rationalization import rationalize_edge_detections
+                dets_for_depth = rationalize_edge_detections(
+                    pil, dets_for_depth, llm_client_shared
+                )
+                clipped = sum(1 for d in dets_for_depth
+                              if d.get("edge_clip_label") in ("CLOSE", "MEDIUM"))
+                yield _event("edge_rat", "ok", title="Edge rationalization",
+                             text=f"{clipped} detection(s) flagged as edge-clipped (override applied)",
+                             meta={"clipped": clipped})
+            except Exception as e:
+                traceback.print_exc()
+                yield _event("edge_rat", "error", title="Edge rationalization",
+                             message=f"{type(e).__name__}: {e}")
+
+        # 9. Triple-fused depth -----------------------------------------------
         enriched: list[dict] = []
         corrected = depth_norm
         if depth_norm is not None and dets_for_depth:
-            yield _event("fused", "running", title="Fused depth heuristics",
-                         message="Fusing depth signals...")
+            yield _event("fused", "running", title="Fused depth (DA + size + area + LLM)",
+                         message="Fusing four depth signals per object...")
             try:
                 from depth_module.fused_depth import enrich_detections
                 enriched, corrected = enrich_detections(
@@ -393,7 +580,45 @@ async def run_full(
                 yield _event("fused", "error", title="Fused depth",
                              message=f"{type(e).__name__}: {e}")
 
-        # 8. scene_data (for 3D rendering) ------------------------------------
+        # 10. LLM consistency loop --------------------------------------------
+        # Ask the LLM to flag physically-inconsistent depth estimates
+        # (helmet vs person, tire vs car, etc.) and snap them together.
+        if enriched and llm_client_shared is not None:
+            yield _event("consistency", "running", title="3D consistency check",
+                         message="LLM reviewing depths for real-world plausibility...")
+            try:
+                corrections = _llm_consistency_check(llm_client_shared, enriched)
+                # Apply corrections, re-derive proximity labels
+                from depth_module.fused_depth import proximity_label as _prox
+                applied = []
+                for c in corrections:
+                    idx = c["id"]
+                    old = enriched[idx].get("depth_score", 0.5)
+                    enriched[idx]["depth_score_original"] = old
+                    enriched[idx]["depth_score"] = c["new_depth"]
+                    enriched[idx]["consistency_reason"] = c["because"]
+                    enriched[idx]["consistency_anchor"] = c.get("anchor_id")
+                    try:
+                        enriched[idx]["proximity_label"] = _prox(c["new_depth"])
+                    except Exception:
+                        pass
+                    applied.append({
+                        "id": idx,
+                        "label": enriched[idx].get("label"),
+                        "old_depth": old, "new_depth": c["new_depth"],
+                        "because": c["because"],
+                    })
+                text = (f"{len(applied)} correction(s) applied"
+                        if applied else "No inconsistencies found")
+                yield _event("consistency", "ok", title="3D consistency check",
+                             text=text,
+                             meta={"corrections": applied})
+            except Exception as e:
+                traceback.print_exc()
+                yield _event("consistency", "error", title="3D consistency check",
+                             message=f"{type(e).__name__}: {e}")
+
+        # 11. scene_data (for 3D rendering) -----------------------------------
         scene_graph_payload = None
         if corrected is not None:
             yield _event("scene", "running", title="3D lift + scene graph",
@@ -406,10 +631,24 @@ async def run_full(
                     for r in sam_results:
                         m = r.get("mask")
                         masks.append(m if m is not None else np.zeros((H, W), dtype=bool))
+                # Sanitize detections: lift_3d uses det.get("depth_score", ...)
+                # which returns None if the key is present with value None.
+                # Replace any None numeric fields with safe defaults.
+                sanitized = []
+                for d in (enriched or dets_for_depth):
+                    dd = dict(d)
+                    if dd.get("depth_score") is None:
+                        dd["depth_score"] = 0.5
+                    if dd.get("score") is None:
+                        dd["score"] = 0.0
+                    if dd.get("risk_score") is None:
+                        dd["risk_score"] = 1
+                    sanitized.append(dd)
+
                 builder = scene_mod.SceneGraphBuilder(point_cloud_step=6)
                 graph = builder.process(
                     depth_map=corrected,
-                    detections=enriched or dets_for_depth,
+                    detections=sanitized,
                     img_w=W, img_h=H,
                     image_id="webui",
                     masks=masks,
@@ -454,12 +693,26 @@ async def run_full(
                 tint_small = cv2.resize(tint_full, (pc_w, pc_h),
                                          interpolation=cv2.INTER_NEAREST)
 
+                # Per-pixel instance index map (0 = background, i+1 = object index).
+                # Lets the client isolate/highlight any single detected object in 3D.
+                src_list = sam_results if sam_results else (enriched or dets_for_depth)
+                seg_idx_full = np.zeros((H, W), dtype=np.uint8)
+                for i, r in enumerate(src_list[:250]):
+                    val = i + 1
+                    if isinstance(r, dict) and r.get("mask") is not None and r["mask"].any():
+                        seg_idx_full[r["mask"]] = val
+                    elif isinstance(r, dict) and "box" in r:
+                        x1, y1, x2, y2 = [int(v) for v in r["box"]]
+                        seg_idx_full[max(0,y1):min(H,y2), max(0,x1):min(W,x2)] = val
+                seg_small = cv2.resize(seg_idx_full, (pc_w, pc_h),
+                                        interpolation=cv2.INTER_NEAREST)
+
                 # send as PNGs
                 ok1, buf1 = cv2.imencode(".png", depth_u8)
                 ok2, buf2 = cv2.imencode(".png", cv2.cvtColor(orig_small, cv2.COLOR_RGB2BGR))
-                # RGBA for tint — cv2 expects BGRA
                 tint_bgra = cv2.cvtColor(tint_small, cv2.COLOR_RGBA2BGRA)
                 ok3, buf3 = cv2.imencode(".png", tint_bgra)
+                ok4, buf4 = cv2.imencode(".png", seg_small)
 
                 fx = max(W, H) * FOCAL_SCALE
 
@@ -489,6 +742,7 @@ async def run_full(
                              depth_png=base64.b64encode(buf1.tobytes()).decode(),
                              color_png=base64.b64encode(buf2.tobytes()).decode(),
                              tint_png=base64.b64encode(buf3.tobytes()).decode(),
+                             seg_png=base64.b64encode(buf4.tobytes()).decode(),
                              W=W, H=H, pc_w=pc_w, pc_h=pc_h,
                              fx=fx, cx=W / 2.0, cy=H / 2.0,
                              nodes=nodes_payload, edges=edges_payload,
@@ -501,11 +755,56 @@ async def run_full(
                 yield _event("scene", "error", title="Scene graph",
                              message=f"{type(e).__name__}: {e}")
 
-        # 9. Decision ----------------------------------------------------------
-        decision = _make_decision(enriched or [])
+        # 11. LLM action decision (canonical — reads SAFETY_RULES.md) -------
+        yield _event("decision", "running", title="Navigation decision",
+                     message="GPT-4o-mini applies SAFETY_RULES.md to the scene graph...")
+
+        scene_text = (scene_graph_payload or {}).get("text") \
+                     or _detection_summary(enriched or [])
+
+        action_result = None
+        safety_rules_path = ROOT / "action_module" / "SAFETY_RULES.md"
+        if llm_client_shared is not None and safety_rules_path.exists():
+            try:
+                # analyse_with_scene_graph needs a file path; drop to a temp file
+                import tempfile
+                from llm_module.llm import analyse_with_scene_graph
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    pil.save(tmp.name, format="PNG")
+                    action_result = analyse_with_scene_graph(
+                        client=llm_client_shared,
+                        original_path=Path(tmp.name),
+                        scene_graph_text=scene_text,
+                        safety_rules=safety_rules_path.read_text(encoding="utf-8"),
+                    )
+            except Exception as e:
+                traceback.print_exc()
+                action_result = None
+
+        if action_result is None:
+            # Fallback to heuristic critic
+            action_result = _make_decision(enriched or [])
+            action_result = {
+                "action": action_result.get("label", "CONTINUE"),
+                "confidence": 0.55,
+                "reasoning": "; ".join(action_result.get("reasons", [])) or "Heuristic fallback.",
+            }
+
+        action = action_result.get("action", "CONTINUE").upper()
+        conf = float(action_result.get("confidence", 0.5))
+        reasoning = action_result.get("reasoning", "")
+        color_map = {"STOP": "#ef4444", "SLOW": "#f59e0b", "CONTINUE": "#10b981"}
         yield _event("decision", "ok", title="Navigation decision",
-                     **decision,
-                     meta={"enriched": enriched,
+                     label=action,
+                     color=color_map.get(action, "#10b981"),
+                     reasons=[reasoning] if reasoning else ["No reasoning provided."],
+                     confidence=conf,
+                     meta={"action": action, "confidence": conf,
+                           "reasoning": reasoning,
+                           "enriched": [
+                               {k: v for k, v in d.items()
+                                if not isinstance(v, np.ndarray)}
+                               for d in enriched],
                            "scene_graph": scene_graph_payload})
 
         yield _event("done", "ok")
