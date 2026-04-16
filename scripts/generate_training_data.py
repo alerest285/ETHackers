@@ -132,12 +132,18 @@ def run(
         depth_kwargs["device"] = 0
     depth_pipe = hf_pipeline(**depth_kwargs)
 
-    if fast and torch.cuda.is_available():
+    # NOTE: torch.compile disabled — was crashing on Northflank GPUs with
+    # "compilation subprocess exited unexpectedly". Skipping for stability.
+    # To re-enable, set env var ENABLE_TORCH_COMPILE=1.
+    import os
+    if fast and torch.cuda.is_available() and os.environ.get("ENABLE_TORCH_COMPILE") == "1":
         try:
             depth_pipe.model = torch.compile(depth_pipe.model, mode="reduce-overhead")
             print("  torch.compile applied to depth model.")
         except Exception as e:
             print(f"  torch.compile skipped ({e})")
+    else:
+        print("  torch.compile disabled (set ENABLE_TORCH_COMPILE=1 to enable).")
 
     graph_builder = SceneGraphBuilder(point_cloud_step=4)
     safety_rules  = (ROOT / "action_module" / "SAFETY_RULES.md").read_text()
